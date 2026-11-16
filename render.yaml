@@ -1,0 +1,26 @@
+# Render Blueprint (запасной вариант). Render → New → Blueprint → выбрать репозиторий.
+services:
+  - type: web
+    name: flow-by-zhenya
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false          # ввести вручную при создании
+      - key: DATABASE_URL
+        sync: false          # строка подключения Neon (postgresql://...sslmode=require)
+      - key: WEBHOOK_BASE_URL
+        sync: false          # https://<имя-сервиса>.onrender.com
+      - key: OWNER_IDS
+        sync: false          # можно оставить пустым и использовать /claim_owner
+      - key: PAYMENT_PROVIDER_TOKEN
+        sync: false
+      - key: CANCEL_HOURS
+        value: "12"
+      - key: TZ_NAME
+        value: Asia/Yekaterinburg
+      - key: STUDIO_NAME
+        value: Flow by Zhenya

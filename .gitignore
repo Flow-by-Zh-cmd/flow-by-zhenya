@@ -1,0 +1,13 @@
+# секреты и данные — не коммитить
+.env
+*.db
+*.db-journal
+# локальное
+venv/
+__pycache__/
+*.log
+*.pid
+webapp_url.txt
+bin/
+tunnel-npm/
+old_menu_button.txt

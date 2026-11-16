@@ -1,0 +1,10 @@
+.env
+*.db
+*.log
+*.pid
+venv/
+bin/
+tunnel-npm/
+__pycache__/
+webapp_url.txt
+.git/
