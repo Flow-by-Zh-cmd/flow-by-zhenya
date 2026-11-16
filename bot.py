@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
@@ -20,7 +21,7 @@ from aiogram.types import (CallbackQuery, Message, PreCheckoutQuery, LabeledPric
                            KeyboardButtonRequestUsers)
 from dotenv import load_dotenv
 
-from db import DB, BookingError, ORDER_STATUSES, FMT
+from db import DB, BookingError, ORDER_STATUSES, FMT, facts_text
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(BASE, ".env")):
@@ -110,12 +111,14 @@ def kb(rows):
     return InlineKeyboardMarkup(inline_keyboard=[[IB(text=t, callback_data=d) for t, d in row] for row in rows])
 
 
-BTN_SCHED, BTN_MY, BTN_SUB, BTN_BUY, BTN_SHOP, BTN_CART, BTN_ADMIN = (
-    "📅 Расписание", "🗓 Мои записи", "🎫 Мой абонемент", "💳 Купить абонемент", "🛍 Магазин", "🛒 Корзина", "⚙️ Админ")
+BTN_ABOUT, BTN_SCHED, BTN_MY, BTN_SUB, BTN_BUY, BTN_SHOP, BTN_CART, BTN_ADMIN = (
+    "🏠 О проекте", "📅 Расписание", "🗓 Мои записи", "🎫 Мой абонемент",
+    "💳 Купить абонемент", "🛍 Магазин", "🛒 Корзина", "⚙️ Админ")
 
 
 def main_menu(uid):
-    rows = [[KeyboardButton(text=BTN_SCHED), KeyboardButton(text=BTN_MY)],
+    rows = [[KeyboardButton(text=BTN_ABOUT)],
+            [KeyboardButton(text=BTN_SCHED), KeyboardButton(text=BTN_MY)],
             [KeyboardButton(text=BTN_SUB), KeyboardButton(text=BTN_BUY)],
             [KeyboardButton(text=BTN_SHOP), KeyboardButton(text=BTN_CART)]]
     if is_owner(uid):
@@ -198,6 +201,11 @@ def webapp_url():
         return None
 
 
+def public_about_url():
+    base = webapp_url() or ((WEBHOOK_BASE_URL + "/") if WEBHOOK_BASE_URL else None)
+    return (base.rstrip("/") + "/about") if base else None
+
+
 class UserMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         u = getattr(event, "from_user", None)
@@ -258,6 +266,15 @@ class CreditN(StatesGroup):
 
 class AddOwner(StatesGroup):
     query = State()
+
+
+class AboutEdit(StatesGroup):
+    value = State()
+    gal_item = State()
+    gal_caption = State()
+    pfl_title = State()
+    pfl_text = State()
+    pfl_photo = State()
 
 
 # ======================= common =======================
@@ -334,6 +351,32 @@ def days_kb(prefix, back=None, all_days=False):
     if back:
         rows.append([("⬅️ Назад", back)])
     return kb(rows), bool(rows)
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\]]+", re.I)
+MAX_TG_FILE = 20 * 1024 * 1024
+
+
+@router.message(F.text == BTN_ABOUT)
+async def m_about(m: Message, state: FSMContext):
+    await state.clear()
+    about = db.get_about()
+    title = about["title"] or STUDIO_NAME
+    text = f"🏠 <b>{e(title)}</b>"
+    if about["tagline"]:
+        text += f"\n{e(about['tagline'])}"
+    if about["description"]:
+        desc = about["description"]
+        if len(desc) > 600:
+            desc = desc[:600] + "…"
+        text += f"\n\n{e(desc)}"
+    rows = []
+    app, page = webapp_url(), public_about_url()
+    if app:
+        rows.append([IB(text="📱 Открыть в приложении", web_app=WebAppInfo(url=app + "about"))])
+    if page:
+        rows.append([IB(text="🌐 Открыть в браузере", url=page)])
+    await m.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
 
 @router.message(F.text == BTN_SCHED)
@@ -799,7 +842,8 @@ admin.callback_query.filter(IsOwner())
 
 
 def admin_menu():
-    return kb([[("📅 Расписание по дням", "adm_days")],
+    return kb([[("🏠 О проекте", "adm_about")],
+               [("📅 Расписание по дням", "adm_days")],
                [("➕ Добавить слот", "adm_addslot"), ("🗓 Шаблон недели", "adm_tpl")],
                [("🎫 Тарифы", "adm_plans"), ("🛍 Товары", "adm_products")],
                [("👤 Клиенты и начисления", "adm_users")],
@@ -821,6 +865,319 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await show(cb, ADMIN_TEXT, admin_menu())
     await cb.answer()
+
+
+
+# ---- about page ----
+def _classify_about_media(m: Message):
+    """Возвращает (kind, file_id, url) или бросает ValueError."""
+    if m.photo:
+        return "photo", m.photo[-1].file_id, None
+    vid = m.video or m.animation
+    if not vid and m.document and (m.document.mime_type or "").startswith("video/"):
+        vid = m.document
+    if vid:
+        if vid.file_size and vid.file_size > MAX_TG_FILE:
+            raise ValueError("Видео больше 20 МБ — Telegram не отдаёт такие файлы боту. "
+                             "Пришлите ссылку на YouTube, VK или Rutube.")
+        return "video", vid.file_id, None
+    text = (m.text or m.caption or "").strip()
+    if text:
+        found = _URL_RE.search(text)
+        if found:
+            return "link", None, found.group(0).rstrip(").,;")
+        if text.startswith(("youtube.com/", "youtu.be/", "vk.com/", "rutube.ru/", "vkvideo.ru/")):
+            return "link", None, "https://" + text
+    raise ValueError("Пришлите фото, видео до 20 МБ или ссылку на YouTube, VK или Rutube.")
+
+
+def about_admin_view():
+    a = db.get_about()
+    desc = a["description"]
+    if len(desc) > 240:
+        desc = desc[:240] + "…"
+    t = (f"🏠 <b>О проекте</b>\n\n"
+         f"<b>Название:</b> {e(a['title']) or '—'}\n"
+         f"<b>Слоган:</b> {e(a['tagline']) or '—'}\n"
+         f"<b>Описание:</b> {e(desc) or '—'}\n"
+         f"<b>Факты:</b> {len(a['facts'])}\n"
+         f"<b>Обложка:</b> {'есть' if a['cover'] else 'нет'}\n"
+         f"<b>Галерея:</b> {len(db.about_media('gallery'))}\n"
+         f"<b>Портфолио:</b> {len(db.about_media('portfolio'))}")
+    k = kb([[("✏️ Название", "abo:t"), ("✏️ Слоган", "abo:g")],
+            [("✏️ Описание", "abo:d"), ("✏️ Факты", "abo:f")],
+            [("🖼 Обложка", "abo:c")],
+            [("🖼 Галерея", "abo:gal"), ("🏆 Портфолио", "abo:pfl")],
+            [("⬅️ Назад", "adm")]])
+    return t, k
+
+
+def about_list_view(section):
+    items = db.about_media(section)
+    title = "🖼 <b>Галерея</b>" if section == "gallery" else "🏆 <b>Портфолио</b>"
+    if not items:
+        title += ("\n\nПока пусто — добавьте фото, видео или ссылку." if section == "gallery"
+                  else "\n\nПока пусто — добавьте работу или отзыв.")
+    rows = []
+    for i, it in enumerate(items, 1):
+        if section == "portfolio":
+            label = f"{i}. {it['title'] or 'Без названия'}"
+            cb = f"abo:p:{it['id']}"
+        else:
+            kind = {"photo": "📷", "video": "🎬", "link": "🔗"}.get(it["kind"], "•")
+            label = f"{i}. {kind} {it['caption'] or it['url'] or it['kind']}"
+            if len(label) > 60:
+                label = label[:57] + "…"
+            cb = f"abo:i:{it['id']}"
+        rows.append([(label, cb)])
+    rows.append([("➕ Добавить", "abo:galadd" if section == "gallery" else "abo:pfladd")])
+    rows.append([("⬅️ Назад", "adm_about")])
+    return title, kb(rows)
+
+
+def about_item_card(mid):
+    it = db.get_about_media(mid)
+    if not it:
+        return None, None
+    if it["section"] == "portfolio":
+        t = (f"🏆 <b>{e(it['title'] or 'Без названия')}</b>\n{e(it['body'] or '—')}\n"
+             f"Фото: {'есть' if it['file_id'] else 'нет'}")
+        k = kb([[("✏️ Название", f"abo:et:{mid}"), ("✏️ Текст", f"abo:eb:{mid}")],
+                [("🖼 Фото", f"abo:ep:{mid}")],
+                [("⬆️ Выше", f"abo:mu:{mid}"), ("⬇️ Ниже", f"abo:md:{mid}")],
+                [("🗑 Удалить", f"abo:del:{mid}")],
+                [("⬅️ К портфолио", "abo:pfl")]])
+    else:
+        kind = {"photo": "Фото", "video": "Видео", "link": "Ссылка"}.get(it["kind"], it["kind"])
+        t = f"🖼 <b>{kind}</b>\nПодпись: {e(it['caption'] or '—')}\n"
+        if it["url"]:
+            t += f"Ссылка: {e(it['url'])}\n"
+        k = kb([[("✏️ Подпись", f"abo:ec:{mid}")],
+                [("⬆️ Выше", f"abo:mu:{mid}"), ("⬇️ Ниже", f"abo:md:{mid}")],
+                [("🗑 Удалить", f"abo:del:{mid}")],
+                [("⬅️ К галерее", "abo:gal")]])
+    return t, k
+
+
+@admin.callback_query(F.data == "adm_about")
+async def cb_adm_about(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    t, k = about_admin_view()
+    await show(cb, t, k)
+    await cb.answer()
+
+
+@admin.callback_query(F.data.in_({"abo:t", "abo:g", "abo:d", "abo:f", "abo:c"}))
+async def cb_about_edit_field(cb: CallbackQuery, state: FSMContext):
+    key = cb.data.split(":")[1]
+    field = {"t": "title", "g": "tagline", "d": "description", "f": "facts", "c": "cover"}[key]
+    await state.set_state(AboutEdit.value)
+    await state.update_data(mode="about", field=field)
+    prompts = {
+        "title": "Введите название страницы (до 120 символов).",
+        "tagline": "Введите слоган (до 200 символов).",
+        "description": "Введите описание студии. Можно несколькими абзацами.",
+        "facts": ("Введите факты — по одному на строку, в формате «Ключ: значение».\n"
+                  "Например:\nТренер: Евгения\nАдрес: ул. Примерная, 1"),
+        "cover": "Пришлите фото обложки или «-», чтобы убрать обложку.",
+    }
+    text = prompts[field]
+    if field == "facts":
+        cur = facts_text(db.get_about()["facts"])
+        if cur:
+            text += f"\n\nСейчас:\n<code>{e(cur)}</code>"
+    await cb.message.answer(text + "\n/cancel — отмена.")
+    await cb.answer()
+
+
+@admin.callback_query(F.data.in_({"abo:gal", "abo:pfl"}))
+async def cb_about_list(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    t, k = about_list_view("gallery" if cb.data == "abo:gal" else "portfolio")
+    await show(cb, t, k)
+    await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("abo:i:") | F.data.startswith("abo:p:"))
+async def cb_about_item(cb: CallbackQuery):
+    t, k = about_item_card(int(cb.data.split(":")[2]))
+    if not t:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    await show(cb, t, k)
+    await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("abo:mu:") | F.data.startswith("abo:md:"))
+async def cb_about_move(cb: CallbackQuery):
+    _, direction, mid = cb.data.split(":")
+    mid = int(mid)
+    result = db.move_about_media(mid, -1 if direction == "mu" else 1)
+    if result is None:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    if result == "top":
+        await cb.answer("Уже первый в списке")
+        return
+    if result == "bottom":
+        await cb.answer("Уже последний в списке")
+        return
+    t, k = about_item_card(mid)
+    await show(cb, t, k)
+    await cb.answer("Готово")
+
+
+@admin.callback_query(F.data.startswith("abo:del:"))
+async def cb_about_del(cb: CallbackQuery):
+    mid = int(cb.data.split(":")[2])
+    it = db.get_about_media(mid)
+    back = f"abo:p:{mid}" if it and it["section"] == "portfolio" else f"abo:i:{mid}"
+    await show(cb, "Удалить этот элемент?", kb([[("🗑 Удалить", f"abo:delok:{mid}"), ("Нет", back)]]))
+    await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("abo:delok:"))
+async def cb_about_del_ok(cb: CallbackQuery):
+    mid = int(cb.data.split(":")[2])
+    it = db.get_about_media(mid)
+    section = it["section"] if it else "gallery"
+    if it:
+        db.delete_about_media(mid)
+    t, k = about_list_view(section)
+    await show(cb, t, k)
+    await cb.answer("Удалено")
+
+
+@admin.callback_query(F.data.startswith("abo:ec:") | F.data.startswith("abo:et:") |
+                      F.data.startswith("abo:eb:") | F.data.startswith("abo:ep:"))
+async def cb_about_item_edit(cb: CallbackQuery, state: FSMContext):
+    _, code, mid = cb.data.split(":")
+    field = {"ec": "caption", "et": "title", "eb": "body", "ep": "file_id"}[code]
+    await state.set_state(AboutEdit.value)
+    await state.update_data(mode="media", field=field, mid=int(mid))
+    prompts = {
+        "caption": "Введите новую подпись или «-», чтобы убрать её.",
+        "title": "Введите название.",
+        "body": "Введите текст (описание, отзыв, результат).",
+        "file_id": "Пришлите фото или «-», чтобы убрать фото.",
+    }
+    await cb.message.answer(prompts[field] + "\n/cancel — отмена.")
+    await cb.answer()
+
+
+@admin.message(AboutEdit.value)
+async def st_about_value(m: Message, state: FSMContext):
+    d = await state.get_data()
+    try:
+        if d["mode"] == "about":
+            if d["field"] == "cover":
+                if m.photo:
+                    db.set_about_field("cover", m.photo[-1].file_id)
+                elif m.text and m.text.strip() == "-":
+                    db.set_about_field("cover", None)
+                else:
+                    raise ValueError("Пришлите фото или «-».")
+            else:
+                text = (m.text or "").strip()
+                if not text:
+                    raise ValueError("Пустое значение.")
+                db.set_about_field(d["field"], text)
+            t, k = about_admin_view()
+        else:
+            mid, field = d["mid"], d["field"]
+            if field == "file_id":
+                if m.photo:
+                    db.update_about_media(mid, "file_id", m.photo[-1].file_id)
+                    db.update_about_media(mid, "kind", "photo")
+                elif m.text and m.text.strip() == "-":
+                    db.update_about_media(mid, "file_id", None)
+                else:
+                    raise ValueError("Пришлите фото или «-».")
+            else:
+                text = (m.text or "").strip()
+                if text == "-":
+                    text = ""
+                if field == "title" and not text:
+                    raise ValueError("Введите название.")
+                db.update_about_media(mid, field, text)
+            t, k = about_item_card(mid)
+        await state.clear()
+        await m.answer("✅ Сохранено.\n\n" + t, reply_markup=k)
+    except ValueError as ex:
+        await m.answer(f"{ex}\n/cancel — отмена.")
+
+
+@admin.callback_query(F.data == "abo:galadd")
+async def cb_gal_add(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AboutEdit.gal_item)
+    await cb.message.answer(
+        "Пришлите фото, видео (до 20 МБ) или ссылку на YouTube, VK или Rutube.\n"
+        "Если видео больше 20 МБ, Telegram не отдаёт его боту — пришлите ссылку.\n/cancel — отмена.")
+    await cb.answer()
+
+
+@admin.message(AboutEdit.gal_item)
+async def st_gal_item(m: Message, state: FSMContext):
+    try:
+        kind, fid, url = _classify_about_media(m)
+    except ValueError as ex:
+        await m.answer(f"{ex}\n/cancel — отмена.")
+        return
+    await state.update_data(kind=kind, file_id=fid, url=url)
+    await state.set_state(AboutEdit.gal_caption)
+    await m.answer("Теперь подпись к этому элементу или «-», чтобы пропустить.")
+
+
+@admin.message(AboutEdit.gal_caption)
+async def st_gal_caption(m: Message, state: FSMContext):
+    cap = None if (m.text or "").strip() == "-" else (m.text or "").strip()[:500] or None
+    d = await state.get_data()
+    mid = db.add_about_media("gallery", d["kind"], file_id=d.get("file_id"), url=d.get("url"), caption=cap)
+    await state.clear()
+    t, k = about_item_card(mid)
+    await m.answer("✅ Добавлено в галерею.\n\n" + t, reply_markup=k)
+
+
+@admin.callback_query(F.data == "abo:pfladd")
+async def cb_pfl_add(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AboutEdit.pfl_title)
+    await cb.message.answer("Введите название работы или отзыва.\n/cancel — отмена.")
+    await cb.answer()
+
+
+@admin.message(AboutEdit.pfl_title)
+async def st_pfl_title(m: Message, state: FSMContext):
+    title = (m.text or "").strip()[:120]
+    if not title:
+        await m.answer("Введите название.\n/cancel — отмена.")
+        return
+    await state.update_data(title=title)
+    await state.set_state(AboutEdit.pfl_text)
+    await m.answer("Теперь текст (описание, результат, отзыв) или «-», чтобы пропустить.")
+
+
+@admin.message(AboutEdit.pfl_text)
+async def st_pfl_text(m: Message, state: FSMContext):
+    body = None if (m.text or "").strip() == "-" else (m.text or "").strip()[:2000] or None
+    await state.update_data(body=body)
+    await state.set_state(AboutEdit.pfl_photo)
+    await m.answer("Пришлите фото или «-», если фото не нужно.")
+
+
+@admin.message(AboutEdit.pfl_photo)
+async def st_pfl_photo(m: Message, state: FSMContext):
+    if m.photo:
+        fid = m.photo[-1].file_id
+    elif m.text and m.text.strip() == "-":
+        fid = None
+    else:
+        await m.answer("Пришлите фото или «-».\n/cancel — отмена.")
+        return
+    d = await state.get_data()
+    mid = db.add_about_media("portfolio", "photo", file_id=fid, title=d["title"], body=d.get("body"))
+    await state.clear()
+    t, k = about_item_card(mid)
+    await m.answer("✅ Добавлено в портфолио.\n\n" + t, reply_markup=k)
 
 
 # ---- schedule ----

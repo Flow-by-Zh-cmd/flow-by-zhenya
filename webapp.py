@@ -2,12 +2,13 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, date, timedelta
 from io import BytesIO
 
 from aiohttp import web
 
-from db import BookingError, ORDER_STATUSES, FMT
+from db import BookingError, ORDER_STATUSES, FMT, video_embed
 from tgauth import validate_init_data, AuthError
 
 log = logging.getLogger("webapp")
@@ -24,7 +25,8 @@ def make_app(core, bot):
 
     @web.middleware
     async def auth_mw(request, handler):
-        if not request.path.startswith("/api/") or request.path.startswith("/api/photo/"):
+        if (not request.path.startswith("/api/") or request.path.startswith("/api/photo/")
+                or request.path.startswith("/api/public/")):
             return await handler(request)
         init = request.headers.get("X-Telegram-Init-Data", "")
         try:
@@ -61,6 +63,82 @@ def make_app(core, bot):
         resp = web.FileResponse(os.path.join(BASE, "webapp", "index.html"))
         resp.headers["Cache-Control"] = "no-store"
         return resp
+
+    # ---------- public about ----------
+    def media_public(item):
+        mid, kind = item["id"], item["kind"]
+        out = {"id": mid, "kind": kind, "caption": item["caption"] or "",
+               "title": item["title"] or "", "text": item["body"] or ""}
+        if item["url"]:
+            out["url"] = item["url"]
+            out["embed"] = video_embed(item["url"])
+        if item["file_id"]:
+            out["src"] = f"/media/{mid}"
+        return out
+
+    async def public_about(request):
+        a = db.get_about()
+        cover = a["cover"]
+        bot_name = os.getenv("BOT_USERNAME", "Flowbyzhenya_bot")
+        return web.json_response({
+            "title": a["title"], "tagline": a["tagline"], "description": a["description"],
+            "facts": a["facts"],
+            "cover": f"/media/cover?v={abs(hash(cover)) % 10**8}" if cover else None,
+            "gallery": [media_public(x) for x in db.about_media("gallery")],
+            "portfolio": [media_public(x) for x in db.about_media("portfolio")],
+            "bot_url": f"https://t.me/{bot_name}", "studio": core.STUDIO_NAME,
+        })
+
+    media_cache, media_cache_total, MEDIA_CACHE_MAX = {}, 0, 40 * 1024 * 1024
+
+    async def fetch_tg_file(fid, kind="photo"):
+        nonlocal media_cache_total
+        hit = media_cache.get(fid)
+        if hit:
+            hit["ts"] = time.time()
+            return hit["ctype"], hit["body"]
+        try:
+            buf = BytesIO()
+            f = await bot.get_file(fid)
+            await bot.download_file(f.file_path, buf)
+            body = buf.getvalue()
+        except Exception as ex:
+            log.warning("getFile failed for %s: %s", fid, ex)
+            raise web.HTTPNotFound()
+        path = getattr(f, "file_path", "") or ""
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        ctypes = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp",
+                  "gif": "image/gif", "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm"}
+        ctype = ctypes.get(ext, "image/jpeg" if kind == "photo" else "video/mp4")
+        n = len(body)
+        if n <= MEDIA_CACHE_MAX:
+            while media_cache and media_cache_total + n > MEDIA_CACHE_MAX:
+                k = min(media_cache, key=lambda x: media_cache[x]["ts"])
+                media_cache_total -= media_cache[k]["n"]
+                del media_cache[k]
+            if fid in media_cache:
+                media_cache_total -= media_cache[fid]["n"]
+            media_cache[fid] = {"n": n, "ctype": ctype, "body": body, "ts": time.time()}
+            media_cache_total += n
+        return ctype, body
+
+    async def media(request):
+        mid = request.match_info["mid"]
+        if mid == "cover":
+            cover = db.get_about()["cover"]
+            if not cover:
+                raise web.HTTPNotFound()
+            ctype, body = await fetch_tg_file(cover, "photo")
+        else:
+            try:
+                item = db.get_about_media(int(mid))
+            except ValueError:
+                raise web.HTTPNotFound()
+            if not item or not item["file_id"]:
+                raise web.HTTPNotFound()
+            ctype, body = await fetch_tg_file(item["file_id"], item["kind"])
+        return web.Response(body=body, content_type=ctype,
+                            headers={"Cache-Control": "public, max-age=86400"})
 
     # ---------- client ----------
     async def me(request):
@@ -291,8 +369,11 @@ def make_app(core, bot):
     r = app.router
     r.add_get("/", index)
     r.add_get("/index.html", index)
+    r.add_get("/about", index)
     r.add_get("/healthz", lambda req: web.Response(text="ok"))
     r.add_get("/health", lambda req: web.Response(text="ok"))
+    r.add_get("/api/public/about", public_about)
+    r.add_get("/media/{mid}", media)
 
     async def tg_js(request):
         # своя копия telegram-web-app.js: telegram.org может не открываться у пользователей в России

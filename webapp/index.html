@@ -97,6 +97,28 @@ nav button.on{color:var(--accent)} nav button.on .ic{filter:none;opacity:1}
 @keyframes sh{to{background-position:-200% 0}}
 h2{font-size:17px;margin:18px 4px 4px}
 .person{display:flex;justify-content:space-between;align-items:center;padding:6px 0;gap:8px}
+.cover{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:20px;background:var(--soft);display:block}
+.about-title{font-size:28px;font-weight:800;letter-spacing:-.03em;margin:10px 4px 0;line-height:1.15}
+.about-tag{color:var(--hint);margin:6px 4px 14px;font-size:16px}
+.about-desc{white-space:pre-wrap;margin:0}
+.facts .fact{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--sep)}
+.facts .fact:last-child{border-bottom:0}
+.facts .k{color:var(--hint);font-size:13px;flex:0 0 38%}
+.facts .v{font-weight:600;text-align:right}
+.gal{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.gal .g{border-radius:14px;overflow:hidden;background:var(--card);aspect-ratio:1/1;position:relative;cursor:pointer}
+.gal .g.wide{grid-column:1/-1;aspect-ratio:16/9;cursor:default}
+.gal .g img,.gal .g video{width:100%;height:100%;object-fit:cover;display:block}
+.gal .cap{position:absolute;left:0;right:0;bottom:0;padding:20px 8px 8px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;font-size:12px}
+.embed{position:relative;aspect-ratio:16/9;border-radius:14px;overflow:hidden;background:#000}
+.embed iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.pfl-img{width:100%;border-radius:12px;margin-bottom:8px;aspect-ratio:16/9;object-fit:cover;display:block}
+.cta{display:flex;flex-direction:column;gap:8px;margin:16px 0 8px}
+.pubbar{background:var(--soft);border-radius:14px;padding:12px 14px;margin:0 0 12px;text-align:center}
+.lb{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:30;display:flex;align-items:center;justify-content:center;padding:16px}
+.lb img,.lb video{max-width:100%;max-height:100%;border-radius:8px}
+a.btn{text-decoration:none}
+nav.tight button,nav.tight a{font-size:10px}
 </style>
 </head>
 <body>
@@ -138,6 +160,7 @@ function sheet(html){
 }
 
 const TABS = [
+  {id:'about', ic:'🏠', t:'О проекте'},
   {id:'schedule', ic:'📅', t:'Расписание'},
   {id:'bookings', ic:'🗓', t:'Записи'},
   {id:'sub', ic:'🎫', t:'Абонемент'},
@@ -146,16 +169,95 @@ const TABS = [
 ];
 function renderNav(){
   const n = document.getElementById('nav');
-  n.innerHTML = TABS.filter(t => !t.owner || S.me?.is_owner).map(t =>
+  if (S.public){
+    const bot = (S.about && S.about.bot_url) || 'https://t.me/Flowbyzhenya_bot';
+    n.innerHTML = `<button class="on"><span class="ic">🏠</span>О проекте</button>
+      <a href="${esc(bot)}" style="flex:1;text-decoration:none;color:var(--hint);font:inherit;font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 0"><span class="ic" style="font-size:21px">📱</span>Бот</a>`;
+    n.classList.remove('tight');
+    return;
+  }
+  const tabs = TABS.filter(t => !t.owner || S.me?.is_owner);
+  n.classList.toggle('tight', tabs.length > 5);
+  n.innerHTML = tabs.map(t =>
     `<button class="${S.tab===t.id?'on':''}" data-tab="${t.id}"><span class="ic">${t.ic}</span>${t.t}${t.id==='shop' && S.me?.cart_count ? `<span class="badge">${S.me.cart_count}</span>`:''}</button>`).join('');
   n.querySelectorAll('button').forEach(b => b.onclick = () => { tap(); go(b.dataset.tab); });
 }
 function go(tab){
+  if (S.public && tab !== 'about'){
+    location.href = (S.about && S.about.bot_url) || 'https://t.me/Flowbyzhenya_bot';
+    return;
+  }
   S.tab = tab; renderNav();
-  document.getElementById('title').textContent = TABS.find(t=>t.id===tab).t === 'Тренер' ? 'Кабинет тренера' : TABS.find(t=>t.id===tab).t;
+  const t = TABS.find(x=>x.id===tab);
+  document.getElementById('title').textContent = t && t.id==='admin' ? 'Кабинет тренера' : (t ? t.t : '');
   $app.innerHTML = '<div class="skel"></div><div class="skel"></div>';
   window.scrollTo(0,0);
-  ({schedule:viewSchedule, bookings:viewBookings, sub:viewSub, shop:viewShop, admin:viewAdmin})[tab]().catch(showErr);
+  ({about:viewAbout, schedule:viewSchedule, bookings:viewBookings, sub:viewSub, shop:viewShop, admin:viewAdmin})[tab]().catch(showErr);
+}
+function openAboutCta(tab){
+  if (S.public){
+    location.href = (S.about && S.about.bot_url) || 'https://t.me/Flowbyzhenya_bot';
+    return;
+  }
+  go(tab);
+}
+function lightbox(html){
+  const bg = document.createElement('div'); bg.className = 'lb'; bg.innerHTML = html;
+  bg.onclick = () => bg.remove();
+  document.body.appendChild(bg);
+}
+
+/* ---------- О проекте ---------- */
+function mediaBlock(item, wide){
+  const cap = item.caption ? `<div class="cap">${esc(item.caption)}</div>` : '';
+  if (item.embed){
+    return `<div class="g wide"><div class="embed"><iframe src="${esc(item.embed)}" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen loading="lazy" title=""></iframe></div>${cap}</div>`;
+  }
+  if (item.kind === 'link' && item.url){
+    return `<div class="g wide" style="aspect-ratio:auto;padding:14px;display:flex;align-items:center;justify-content:center;text-align:center"><a href="${esc(item.url)}" target="_blank" rel="noopener" style="color:var(--link);font-weight:600">${esc(item.caption || item.url)}</a></div>`;
+  }
+  if (item.kind === 'video' && item.src){
+    return `<div class="g ${wide?'wide':''}" data-src="${esc(item.src)}" data-kind="video">${cap}<video src="${esc(item.src)}" preload="metadata" playsinline></video></div>`;
+  }
+  if (item.src){
+    return `<div class="g" data-src="${esc(item.src)}" data-kind="photo"><img src="${esc(item.src)}" alt="${esc(item.caption||'')}" loading="lazy">${cap}</div>`;
+  }
+  return '';
+}
+async function viewAbout(){
+  const a = await fetch('/api/public/about').then(r => { if(!r.ok) throw new Error('Не удалось загрузить страницу'); return r.json(); });
+  S.about = a;
+  if (a.studio) document.getElementById('brand').textContent = a.studio;
+  if (a.title) document.title = a.title;
+  document.getElementById('title').textContent = 'О проекте';
+  renderNav();
+  const facts = (a.facts||[]).map(f => f.label
+    ? `<div class="fact"><div class="k">${esc(f.label)}</div><div class="v">${esc(f.value)}</div></div>`
+    : `<div class="fact"><div class="v" style="text-align:left;flex:1">${esc(f.value)}</div></div>`).join('');
+  const gal = (a.gallery||[]).map(g => mediaBlock(g, g.kind!=='photo')).join('');
+  const pfl = (a.portfolio||[]).map(p => `<div class="card">${p.src ? `<img class="pfl-img" src="${esc(p.src)}" alt="" loading="lazy">` : ''}
+    ${p.title ? `<b>${esc(p.title)}</b>` : ''}${p.text ? `<div class="small" style="white-space:pre-wrap;margin-top:6px">${esc(p.text)}</div>` : ''}</div>`).join('');
+  const bot = a.bot_url || 'https://t.me/Flowbyzhenya_bot';
+  const cta = S.public
+    ? `<div class="cta"><a class="btn" href="${esc(bot)}">📅 Записаться на тренировку</a><a class="btn sec" href="${esc(bot)}">🛍 Открыть магазин в боте</a><a class="btn sec" href="${esc(bot)}">📱 Открыть бота @Flowbyzhenya_bot</a></div>`
+    : `<div class="cta"><button class="btn" id="ctaSch">📅 Записаться на тренировку</button><button class="btn sec" id="ctaShop">🛍 Перейти в магазин</button></div>`;
+  $app.innerHTML = `
+    ${S.public ? `<div class="pubbar small">Страница студии. Запись и магазин — в Telegram-боте<br><a href="${esc(bot)}" style="color:var(--link);font-weight:600">@Flowbyzhenya_bot</a></div>` : ''}
+    ${a.cover ? `<img class="cover" src="${esc(a.cover)}" alt="">` : ''}
+    <div class="about-title">${esc(a.title || a.studio || 'О проекте')}</div>
+    ${a.tagline ? `<div class="about-tag">${esc(a.tagline)}</div>` : ''}
+    ${a.description ? `<div class="card about-desc">${esc(a.description)}</div>` : ''}
+    ${facts ? `<div class="card facts">${facts}</div>` : ''}
+    ${gal ? `<h2>Галерея</h2><div class="gal">${gal}</div>` : ''}
+    ${pfl ? `<h2>Портфолио</h2><div class="pfl">${pfl}</div>` : ''}
+    ${cta}`;
+  document.getElementById('ctaSch')?.addEventListener('click', () => openAboutCta('schedule'));
+  document.getElementById('ctaShop')?.addEventListener('click', () => openAboutCta('shop'));
+  $app.querySelectorAll('.g[data-src]').forEach(el => el.onclick = () => {
+    const src = el.dataset.src;
+    if (el.dataset.kind === 'video') lightbox(`<video src="${esc(src)}" controls autoplay playsinline></video>`);
+    else lightbox(`<img src="${esc(src)}" alt="">`);
+  });
 }
 function showErr(e){ $app.innerHTML = `<div class="empty"><div class="e">😕</div>${esc(e.message)}<br><br><button class="btn sec sm" onclick="go(S.tab)">Повторить</button></div>`; }
 async function refreshMe(){ S.me = await api('/api/me'); renderNav(); }
@@ -369,11 +471,14 @@ async function adminOrders(){
 /* ---------- start ---------- */
 (async function init(){
   if (tg){ tg.ready(); tg.expand(); try { tg.setHeaderColor('secondary_bg_color'); tg.setBackgroundColor('secondary_bg_color'); } catch(e){} }
-  if (!tg || !tg.initData){
-    $app.innerHTML = `<div class="empty"><div class="e">📱</div>Откройте приложение через Telegram-бота<br><b>@Flowbyzhenya_bot</b><br><br><a class="btn sm" style="text-decoration:none" href="https://t.me/Flowbyzhenya_bot">Открыть бота</a></div>`;
-    document.getElementById('nav').style.display = 'none'; return;
+  const inTg = !!(tg && tg.initData);
+  if (!inTg){
+    S.public = true; S.tab = 'about';
+    try { await viewAbout(); }
+    catch(e){ showErr(e); }
+    return;
   }
-  try { await refreshMe(); document.getElementById('brand').textContent = S.me.studio; go('schedule'); }
+  try { await refreshMe(); document.getElementById('brand').textContent = S.me.studio; go('about'); }
   catch(e){ showErr(e); }
 })();
 </script>

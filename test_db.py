@@ -1,6 +1,6 @@
 import os, tempfile, unittest
 from datetime import datetime, timedelta, date
-from db import DB, BookingError
+from db import DB, BookingError, parse_facts, facts_text, video_embed
 
 NOW = datetime(2026, 11, 16, 10, 0)
 
@@ -203,6 +203,70 @@ class T(unittest.TestCase):
         finally:
             db.conn.close()
             os.remove(path)
+
+    def test_about_seed_and_fields(self):
+        self.assertTrue(self.db.seed_about_if_empty())
+        self.assertFalse(self.db.seed_about_if_empty())
+        a = self.db.get_about()
+        self.assertIn("(пример)", a["title"])
+        self.assertTrue(a["tagline"])
+        self.assertTrue(a["description"])
+        self.assertGreaterEqual(len(a["facts"]), 3)
+        self.assertIsNone(a["cover"])
+        self.db.set_about_field("title", "Студия")
+        self.db.set_about_field("tagline", "Слоган")
+        self.db.set_about_field("description", "Текст")
+        self.db.set_about_field("facts", "Тренер: Анна\nАдрес: центр")
+        self.db.set_about_field("cover", "AgAC-file")
+        a = self.db.get_about()
+        self.assertEqual((a["title"], a["tagline"], a["description"], a["cover"]),
+                         ("Студия", "Слоган", "Текст", "AgAC-file"))
+        self.assertEqual(a["facts"], [{"label": "Тренер", "value": "Анна"},
+                                      {"label": "Адрес", "value": "центр"}])
+        self.db.set_about_field("cover", None)
+        self.assertIsNone(self.db.get_about()["cover"])
+        with self.assertRaises(ValueError):
+            self.db.set_about_field("nope", "x")
+
+    def test_about_media_order(self):
+        a = self.db.add_about_media("gallery", "photo", file_id="f1", caption="один")
+        b = self.db.add_about_media("gallery", "link", url="https://youtu.be/dQw4w9wgGcQ", caption="ролик")
+        c = self.db.add_about_media("gallery", "video", file_id="f3")
+        p1 = self.db.add_about_media("portfolio", "photo", file_id="p1", title="Кейс", body="Результат")
+        titles = [m["caption"] or m["kind"] for m in self.db.about_media("gallery")]
+        self.assertEqual(titles, ["один", "ролик", "video"])
+        self.assertEqual(self.db.move_about_media(a, -1), "top")
+        self.assertEqual(self.db.move_about_media(a, 1), "ok")
+        self.assertEqual([m["id"] for m in self.db.about_media("gallery")], [b, a, c])
+        self.assertEqual(self.db.move_about_media(c, 1), "bottom")
+        # сдвиг в галерее не меняет портфолио
+        self.assertEqual([m["id"] for m in self.db.about_media("portfolio")], [p1])
+        self.db.add_about_media("portfolio", "photo", file_id="p2", title="Ещё")
+        self.assertEqual([m["title"] for m in self.db.about_media("portfolio")], ["Кейс", "Ещё"])
+        self.db.update_about_media(p1, "title", "Кейс 2")
+        self.assertEqual(self.db.get_about_media(p1)["title"], "Кейс 2")
+        self.db.delete_about_media(a)
+        self.assertEqual([m["id"] for m in self.db.about_media("gallery")], [b, c])
+        self.assertIsNone(self.db.move_about_media(999, 1))
+        with self.assertRaises(ValueError):
+            self.db.add_about_media("nope", "photo")
+
+    def test_facts_and_embed_helpers(self):
+        self.assertEqual(parse_facts("A: 1\n\nпросто"),
+                         [{"label": "A", "value": "1"}, {"label": "", "value": "просто"}])
+        self.assertEqual(facts_text([{"label": "A", "value": "1"}]), "A: 1")
+        self.assertEqual(video_embed("https://youtu.be/abcdefghijk"),
+                         "https://www.youtube.com/embed/abcdefghijk")
+        self.assertEqual(video_embed("https://vk.com/video-1_2"),
+                         "https://vk.com/video_ext.php?oid=-1&id=2")
+        self.assertIsNone(video_embed("https://example.com/watch"))
+
+    def test_seed_about_when_already_seeded(self):
+        self.assertTrue(self.db.seed_if_empty(NOW.date()))
+        self.db.x("DELETE FROM settings WHERE key LIKE 'about_%'")
+        self.assertTrue(self.db.seed_if_empty(NOW.date()))  # только about
+        self.assertIn("(пример)", self.db.get_about()["title"])
+        self.assertFalse(self.db.seed_if_empty(NOW.date()))
 
     def test_update_field_whitelist(self):
         pid = self.db.add_plan("x", 1, 1, 100)

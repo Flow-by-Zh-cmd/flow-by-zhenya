@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, kind TEXT, ref_id INTEGER, amount INTEGER,
     currency TEXT, tg_charge_id TEXT, provider_charge_id TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS about_media (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, file_id TEXT, url TEXT,
+    caption TEXT, section TEXT NOT NULL, sort INTEGER, title TEXT, body TEXT);
 """
 
 _TS = "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
@@ -70,9 +73,12 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS payments (
     id BIGSERIAL PRIMARY KEY, user_id BIGINT, kind TEXT, ref_id BIGINT, amount BIGINT, currency TEXT,
     tg_charge_id TEXT, provider_charge_id TEXT, created TEXT DEFAULT {_TS});
+CREATE TABLE IF NOT EXISTS about_media (
+    id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT, url TEXT,
+    caption TEXT, section TEXT NOT NULL, sort INTEGER, title TEXT, body TEXT);
 """
 
-TABLES = ["settings", "users", "slots", "plans", "subscriptions", "bookings", "products", "cart", "orders", "payments"]
+TABLES = ["settings", "users", "slots", "plans", "subscriptions", "bookings", "products", "cart", "orders", "payments", "about_media"]
 
 ORDER_STATUSES = {
     "new": "Новый", "confirmed": "Подтверждён", "shipped": "Передан в доставку",
@@ -81,9 +87,58 @@ ORDER_STATUSES = {
 
 FMT = "%Y-%m-%d %H:%M"
 
+ABOUT_FIELDS = {"title", "tagline", "description", "facts", "cover"}
+ABOUT_MEDIA_KINDS = {"photo", "video", "link"}
+ABOUT_SECTIONS = {"gallery", "portfolio"}
+
 
 class BookingError(Exception):
     pass
+
+
+def parse_facts(text):
+    """Текст фактов: одна строка — один факт, «Ключ: значение» или просто строка."""
+    facts = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k, v = k.strip()[:80], v.strip()[:500]
+            if k or v:
+                facts.append({"label": k, "value": v})
+        else:
+            facts.append({"label": "", "value": line[:500]})
+    return facts
+
+
+def facts_text(facts):
+    lines = []
+    for f in facts or []:
+        if f.get("label"):
+            lines.append(f"{f['label']}: {f.get('value') or ''}")
+        else:
+            lines.append(f.get("value") or "")
+    return "\n".join(lines)
+
+
+def video_embed(url):
+    """Возвращает URL для iframe (YouTube / VK / Rutube) или None."""
+    import re
+    if not url:
+        return None
+    u = url.strip()
+    m = re.search(r"(?:youtube\.com/watch\?[^\s]*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)([A-Za-z0-9_-]{6,})", u)
+    if m:
+        return f"https://www.youtube.com/embed/{m.group(1)}"
+    m = re.search(r"rutube\.ru/(?:video|play/embed)/([A-Za-z0-9]+)", u)
+    if m:
+        return f"https://rutube.ru/play/embed/{m.group(1)}"
+    m = re.search(r"(?:vk\.com|vkvideo\.ru)/video(-?\d+)_(\d+)", u)
+    if m:
+        return f"https://vk.com/video_ext.php?oid={m.group(1)}&id={m.group(2)}"
+    return None
 
 
 def is_pg_url(s):
@@ -478,25 +533,143 @@ class DB:
                   VALUES(?,?,?,?,?,?,?)""", uid, kind, ref_id, amount, currency, tg_id, prov_id)
         return True
 
+    # ---------- about ----------
+    def get_about(self):
+        raw = self.get_setting("about_facts") or "[]"
+        try:
+            facts = json.loads(raw)
+        except json.JSONDecodeError:
+            facts = []
+        if not isinstance(facts, list):
+            facts = []
+        out = []
+        for f in facts:
+            if isinstance(f, dict):
+                out.append({"label": str(f.get("label") or "")[:80], "value": str(f.get("value") or "")[:500]})
+            elif isinstance(f, str) and f.strip():
+                out.append({"label": "", "value": f.strip()[:500]})
+        return {
+            "title": self.get_setting("about_title") or "",
+            "tagline": self.get_setting("about_tagline") or "",
+            "description": self.get_setting("about_description") or "",
+            "facts": out,
+            "cover": self.get_setting("about_cover") or None,
+        }
+
+    def set_about_field(self, field, value):
+        if field not in ABOUT_FIELDS:
+            raise ValueError("bad field")
+        if field == "facts":
+            if isinstance(value, str):
+                value = parse_facts(value)
+            value = json.dumps(value or [], ensure_ascii=False)
+        elif field == "cover":
+            value = value or ""
+        elif field == "description":
+            value = (value or "")[:4000]
+        elif field == "tagline":
+            value = (value or "")[:200]
+        else:
+            value = (value or "")[:120]
+        if field == "cover" and not value:
+            self.x("DELETE FROM settings WHERE key=?", "about_cover")
+            return
+        self.set_setting(f"about_{field}", value)
+
+    def about_media(self, section=None):
+        if section:
+            if section not in ABOUT_SECTIONS:
+                raise ValueError("bad section")
+            return self.q("SELECT * FROM about_media WHERE section=? ORDER BY sort, id", section)
+        return self.q("SELECT * FROM about_media ORDER BY section, sort, id")
+
+    def get_about_media(self, mid):
+        return self.q1("SELECT * FROM about_media WHERE id=?", mid)
+
+    def add_about_media(self, section, kind, file_id=None, url=None, caption=None, title=None, body=None):
+        if section not in ABOUT_SECTIONS:
+            raise ValueError("bad section")
+        if kind not in ABOUT_MEDIA_KINDS:
+            raise ValueError("bad kind")
+        nxt = self.q1("SELECT COALESCE(MAX(sort), 0) + 1 AS n FROM about_media WHERE section=?", section)["n"]
+        return self.insert(
+            "INSERT INTO about_media(kind,file_id,url,caption,section,sort,title,body) VALUES(?,?,?,?,?,?,?,?)",
+            kind, file_id, url, (caption or "")[:500] or None, section, nxt,
+            (title or "")[:120] or None, (body or "")[:2000] or None)
+
+    def update_about_media(self, mid, field, value):
+        allowed = {"caption", "title", "body", "file_id", "url", "kind"}
+        if field not in allowed:
+            raise ValueError("bad field")
+        if field == "caption":
+            value = (value or "")[:500] or None
+        elif field == "title":
+            value = (value or "")[:120] or None
+        elif field == "body":
+            value = (value or "")[:2000] or None
+        self.x(f"UPDATE about_media SET {field}=? WHERE id=?", value, mid)
+
+    def delete_about_media(self, mid):
+        self.x("DELETE FROM about_media WHERE id=?", mid)
+
+    def move_about_media(self, mid, delta):
+        """Сдвигает элемент в пределах своей секции. Возвращает 'ok'/'top'/'bottom'/None."""
+        item = self.get_about_media(mid)
+        if not item:
+            return None
+        ids = [p["id"] for p in self.about_media(item["section"])]
+        try:
+            i = ids.index(mid)
+        except ValueError:
+            return None
+        j = i + int(delta)
+        if j < 0:
+            return "top"
+        if j >= len(ids):
+            return "bottom"
+        ids[i], ids[j] = ids[j], ids[i]
+        for n, iid in enumerate(ids, start=1):
+            self.x("UPDATE about_media SET sort=? WHERE id=?", n, iid)
+        return "ok"
+
+    def seed_about_if_empty(self):
+        """Заполняет заголовок и факты-примеры, только если страница ещё пустая."""
+        if (self.get_setting("about_title") or "").strip():
+            return False
+        self.set_about_field("title", "Flow by Zhenya (пример)")
+        self.set_about_field("tagline", "Персональные и групповые тренировки (пример)")
+        self.set_about_field("description",
+            "Короткое описание студии — замените на своё. Здесь можно рассказать о подходе, зале и атмосфере занятий. (пример)")
+        self.set_about_field("facts", [
+            {"label": "Тренер", "value": "Евгения (пример)"},
+            {"label": "Адрес", "value": "Адрес студии уточните у тренера (пример)"},
+            {"label": "Формат", "value": "Персональные и групповые занятия (пример)"},
+            {"label": "Контакты", "value": "@Flowbyzhenya_bot (пример)"},
+        ])
+        return True
+
     # ---------- seed ----------
     def seed_if_empty(self, today: date):
-        if self.get_setting("seeded") == "1":
-            return False
-        if not self.q1("SELECT 1 FROM plans"):
-            self.add_plan("4 занятия (пример)", 4, 30, 1000000)
-            self.add_plan("8 занятий (пример)", 8, 45, 1800000)
-            self.add_plan("12 занятий (пример)", 12, 60, 2400000)
-        if not self.q1("SELECT 1 FROM products"):
-            self.add_product("Протеин сывороточный 900 г (пример)", "Шоколадный вкус. Пример товара — замените на свой.", 250000)
-            self.add_product("Резинки для фитнеса, набор 5 шт. (пример)", "Разная жёсткость, чехол в комплекте. Пример товара.", 90000)
-            self.add_product("Шейкер 700 мл (пример)", "С отделением для порошка. Пример товара.", 50000)
-        if not self.q1("SELECT 1 FROM slots"):
-            start = today + timedelta(days=1)
-            self.generate_template(start, 1, {0, 1, 2, 3, 4}, 9, 20, 1)
-            # пример групповой тренировки по субботам
-            for i in range(7):
-                d = start + timedelta(days=i)
-                if d.weekday() == 5:
-                    self.add_slot(datetime(d.year, d.month, d.day, 11, 0), 8, "Групповая тренировка (пример)")
-        self.set_setting("seeded", "1")
-        return True
+        did = False
+        if self.get_setting("seeded") != "1":
+            if not self.q1("SELECT 1 FROM plans"):
+                self.add_plan("4 занятия (пример)", 4, 30, 1000000)
+                self.add_plan("8 занятий (пример)", 8, 45, 1800000)
+                self.add_plan("12 занятий (пример)", 12, 60, 2400000)
+            if not self.q1("SELECT 1 FROM products"):
+                self.add_product("Протеин сывороточный 900 г (пример)", "Шоколадный вкус. Пример товара — замените на свой.", 250000)
+                self.add_product("Резинки для фитнеса, набор 5 шт. (пример)", "Разная жёсткость, чехол в комплекте. Пример товара.", 90000)
+                self.add_product("Шейкер 700 мл (пример)", "С отделением для порошка. Пример товара.", 50000)
+            if not self.q1("SELECT 1 FROM slots"):
+                start = today + timedelta(days=1)
+                self.generate_template(start, 1, {0, 1, 2, 3, 4}, 9, 20, 1)
+                # пример групповой тренировки по субботам
+                for i in range(7):
+                    d = start + timedelta(days=i)
+                    if d.weekday() == 5:
+                        self.add_slot(datetime(d.year, d.month, d.day, 11, 0), 8, "Групповая тренировка (пример)")
+            self.set_setting("seeded", "1")
+            did = True
+        if self.seed_about_if_empty():
+            did = True
+        return did

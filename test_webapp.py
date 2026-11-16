@@ -32,7 +32,8 @@ class WebAppTest(AioHTTPTestCase):
     async def get_application(self):
         self.fb = FakeBot()
         core.db.conn.executescript("DELETE FROM slots; DELETE FROM bookings; DELETE FROM subscriptions; DELETE FROM orders;"
-                                   "DELETE FROM cart; DELETE FROM settings; DELETE FROM plans; DELETE FROM products; DELETE FROM sqlite_sequence;")
+                                   "DELETE FROM cart; DELETE FROM settings; DELETE FROM plans; DELETE FROM products;"
+                                   "DELETE FROM about_media; DELETE FROM sqlite_sequence;")
         core.db.seed_if_empty(core.now().date())
         core.db.claim_owner(OWNER)
         core.PAY_TOKEN = ""
@@ -123,6 +124,32 @@ class WebAppTest(AioHTTPTestCase):
             self.assertEqual((await self.call("/api/admin/orders", uid=777))[0], 200)
         finally:
             core.ENV_OWNER_IDS.clear(); core.ENV_OWNER_IDS.update(old)
+
+    async def test_public_about(self):
+        r = await self.client.get("/api/public/about")
+        self.assertEqual(r.status, 200)
+        j = await r.json()
+        self.assertIn("(пример)", j["title"])
+        self.assertGreaterEqual(len(j["facts"]), 3)
+        self.assertEqual(j["bot_url"], "https://t.me/Flowbyzhenya_bot")
+        self.assertEqual(j["gallery"], [])
+        self.assertEqual((await self.call("/api/me", init=""))[0], 401)
+        self.assertEqual((await self.call("/api/days", init=""))[0], 401)
+        self.assertEqual((await self.call("/api/admin/orders", init=""))[0], 401)
+        r = await self.client.get("/about")
+        self.assertEqual(r.status, 200)
+        self.assertIn("О проекте", await r.text())
+        r = await self.client.get("/")
+        self.assertEqual(r.status, 200)
+        self.assertEqual((await self.client.get("/media/999999")).status, 404)
+        self.assertEqual((await self.client.get("/media/cover")).status, 404)
+        core.db.set_about_field("title", "Новое имя")
+        core.db.add_about_media("gallery", "link", url="https://youtu.be/abcdefghijk", caption="ролик")
+        core.db.add_about_media("portfolio", "photo", title="Кейс (пример)", body="Результат")
+        j = await (await self.client.get("/api/public/about")).json()
+        self.assertEqual(j["title"], "Новое имя")
+        self.assertEqual(j["gallery"][0]["embed"], "https://www.youtube.com/embed/abcdefghijk")
+        self.assertEqual(j["portfolio"][0]["title"], "Кейс (пример)")
 
     async def test_admin_schedule(self):
         day = (core.now().date() + timedelta(days=3)).isoformat()
