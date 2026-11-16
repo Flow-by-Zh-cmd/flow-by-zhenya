@@ -1139,8 +1139,8 @@ def plan_card(pid):
 
 
 def products_admin_view():
-    rows = [[(f"{'' if p['active'] else '🚫 '}{p['title']} — {money(p['price'])}", f"apr:{p['id']}")]
-            for p in db.products(only_active=False)]
+    rows = [[(f"{i}. {'' if p['active'] else '🚫 '}{p['title']} — {money(p['price'])}", f"apr:{p['id']}")]
+            for i, p in enumerate(db.products(only_active=False), 1)]
     rows.append([("➕ Новый товар", "apradd")])
     rows.append([("⬅️ Назад", "adm")])
     return "🛍 <b>Товары</b> (🚫 — скрыт от клиентов)", kb(rows)
@@ -1150,10 +1150,14 @@ def product_card(pid):
     p = db.get_product(pid)
     if not p:
         return None, None
+    ids = [x["id"] for x in db.products(only_active=False)]
+    pos = ids.index(pid) + 1 if pid in ids else "?"
     t = (f"🛍 <b>{e(p['title'])}</b>\n{e(p['description'])}\nЦена: {money(p['price'])}\n"
-         f"Фото: {'есть' if p['photo'] else 'нет'}\nСтатус: {'виден клиентам' if p['active'] else 'скрыт'}")
+         f"Фото: {'есть' if p['photo'] else 'нет'}\nСтатус: {'виден клиентам' if p['active'] else 'скрыт'}\n"
+         f"Позиция: {pos} из {len(ids)}")
     k = kb([[("✏️ Название", f"aed:products:{pid}:title"), ("✏️ Описание", f"aed:products:{pid}:description")],
             [("✏️ Цена", f"aed:products:{pid}:price"), ("🖼 Фото", f"aed:products:{pid}:photo")],
+            [("⬆️ Выше", f"apm:u:{pid}"), ("⬇️ Ниже", f"apm:d:{pid}")],
             [("👁 Скрыть/показать", f"atg:products:{pid}"), ("🗑 Удалить", f"adp:products:{pid}")],
             [("⬅️ К товарам", "adm_products")]])
     return t, k
@@ -1187,6 +1191,24 @@ async def cb_adm_card(cb: CallbackQuery):
         return
     await show(cb, t, k)
     await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("apm:"))
+async def cb_product_move(cb: CallbackQuery):
+    _, direction, pid = cb.data.split(":")
+    result = db.move_product(int(pid), -1 if direction == "u" else 1)
+    if result is None:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    if result == "top":
+        await cb.answer("Уже первый в списке")
+        return
+    if result == "bottom":
+        await cb.answer("Уже последний в списке")
+        return
+    t, k = product_card(int(pid))
+    await show(cb, t, k)
+    await cb.answer("Готово")
 
 
 @admin.callback_query(F.data.startswith("atg:"))

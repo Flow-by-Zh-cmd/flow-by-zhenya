@@ -147,6 +147,63 @@ class T(unittest.TestCase):
         self.assertTrue(self.db.record_payment(1, "plan", 1, 100, "RUB", "tg1", "p1"))
         self.assertFalse(self.db.record_payment(1, "plan", 1, 100, "RUB", "tg1", "p1"))
 
+    def test_product_sort(self):
+        a = self.db.add_product("A", "d", 100)
+        b = self.db.add_product("B", "d", 200)
+        c = self.db.add_product("C", "d", 300)
+        self.assertEqual([p["title"] for p in self.db.products()], ["A", "B", "C"])
+        self.assertEqual(self.db.move_product(a, -1), "top")
+        self.assertEqual([p["title"] for p in self.db.products()], ["A", "B", "C"])
+        self.assertEqual(self.db.move_product(a, 1), "ok")
+        self.assertEqual([p["title"] for p in self.db.products()], ["B", "A", "C"])
+        self.assertEqual(self.db.move_product(c, 1), "bottom")
+        self.assertEqual([p["title"] for p in self.db.products()], ["B", "A", "C"])
+        self.assertEqual(self.db.move_product(c, -1), "ok")
+        self.assertEqual([p["title"] for p in self.db.products()], ["B", "C", "A"])
+        # скрытые товары тоже участвуют в порядке
+        self.db.update_field("products", b, "active", 0)
+        self.assertEqual([p["title"] for p in self.db.products()], ["C", "A"])
+        self.assertEqual(self.db.move_product(c, -1), "ok")
+        self.assertEqual([p["title"] for p in self.db.products(only_active=False)], ["C", "B", "A"])
+        # новый товар встаёт в конец
+        self.db.add_product("D", "d", 400)
+        self.assertEqual([p["title"] for p in self.db.products(only_active=False)], ["C", "B", "A", "D"])
+        self.assertIsNone(self.db.move_product(99999, 1))
+        # корзина следует тому же порядку
+        self.db.update_field("products", b, "active", 1)
+        self.db.cart_add(1, a)
+        self.db.cart_add(1, b)
+        self.db.cart_add(1, c)
+        titles = [r["title"] for r in self.db.cart(1)[0]]
+        self.assertEqual(titles, ["C", "B", "A"])
+
+    def test_product_sort_migration(self):
+        import sqlite3
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            CREATE TABLE products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, price INTEGER,
+                photo TEXT, active INTEGER DEFAULT 1);
+            INSERT INTO products(title,description,price) VALUES('X','d',1);
+            INSERT INTO products(title,description,price) VALUES('Y','d',2);
+        """)
+        conn.close()
+        db = DB(path)
+        try:
+            rows = db.products(only_active=False)
+            self.assertEqual([p["title"] for p in rows], ["X", "Y"])
+            self.assertEqual(rows[0]["sort"], rows[0]["id"])
+            self.assertEqual(rows[1]["sort"], rows[1]["id"])
+            self.assertEqual(db.move_product(rows[0]["id"], 1), "ok")
+            self.assertEqual([p["title"] for p in db.products()], ["Y", "X"])
+            z = db.add_product("Z", "d", 3)
+            self.assertEqual([p["title"] for p in db.products()], ["Y", "X", "Z"])
+            self.assertEqual(db.get_product(z)["sort"], 3)
+        finally:
+            db.conn.close()
+            os.remove(path)
+
     def test_update_field_whitelist(self):
         pid = self.db.add_plan("x", 1, 1, 100)
         self.db.update_field("plans", pid, "price", 500)

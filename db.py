@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS bookings (
 CREATE INDEX IF NOT EXISTS ix_book_slot ON bookings(slot_id, status);
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, price INTEGER,
-    photo TEXT, active INTEGER DEFAULT 1);
+    photo TEXT, active INTEGER DEFAULT 1, sort INTEGER);
 CREATE TABLE IF NOT EXISTS cart (user_id INTEGER, product_id INTEGER, qty INTEGER,
     PRIMARY KEY (user_id, product_id));
 CREATE TABLE IF NOT EXISTS orders (
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS bookings (
     status TEXT DEFAULT 'active', created TEXT DEFAULT {_TS});
 CREATE INDEX IF NOT EXISTS ix_book_slot ON bookings(slot_id, status);
 CREATE TABLE IF NOT EXISTS products (
-    id BIGSERIAL PRIMARY KEY, title TEXT, description TEXT, price BIGINT, photo TEXT, active INTEGER DEFAULT 1);
+    id BIGSERIAL PRIMARY KEY, title TEXT, description TEXT, price BIGINT, photo TEXT, active INTEGER DEFAULT 1, sort INTEGER);
 CREATE TABLE IF NOT EXISTS cart (user_id BIGINT, product_id BIGINT, qty INTEGER, PRIMARY KEY (user_id, product_id));
 CREATE TABLE IF NOT EXISTS orders (
     id BIGSERIAL PRIMARY KEY, user_id BIGINT, items TEXT, total BIGINT, delivery TEXT, address TEXT, phone TEXT,
@@ -102,6 +102,7 @@ class DB:
                     self.x(stmt)
         else:
             self.conn.executescript(SCHEMA)
+        self._migrate()
 
     def _connect(self):
         if self.pg:
@@ -155,6 +156,18 @@ class DB:
         if self.pg:
             return self._exec(sql + " RETURNING id", a).fetchone()["id"]
         return self._exec(sql, a).lastrowid
+
+    def _column_names(self, table):
+        if self.pg:
+            rows = self.q("""SELECT column_name AS name FROM information_schema.columns
+                               WHERE table_schema='public' AND table_name=?""", table)
+            return {r["name"] for r in rows}
+        return {r["name"] for r in self.q(f"PRAGMA table_info({table})")}
+
+    def _migrate(self):
+        if "sort" not in self._column_names("products"):
+            self.x("ALTER TABLE products ADD COLUMN sort INTEGER")
+        self.x("UPDATE products SET sort = id WHERE sort IS NULL")
 
     # ---------- settings / owner ----------
     def get_setting(self, key, default=None):
@@ -382,14 +395,33 @@ class DB:
 
     # ---------- products / cart ----------
     def products(self, only_active=True):
-        return self.q("SELECT * FROM products" + (" WHERE active=1" if only_active else "") + " ORDER BY id")
+        return self.q("SELECT * FROM products" + (" WHERE active=1" if only_active else "") + " ORDER BY sort, id")
 
     def get_product(self, pid):
         return self.q1("SELECT * FROM products WHERE id=?", pid)
 
     def add_product(self, title, description, price, photo=None):
-        return self.insert("INSERT INTO products(title,description,price,photo) VALUES(?,?,?,?)",
-                      title, description, price, photo)
+        nxt = self.q1("SELECT COALESCE(MAX(sort), 0) + 1 AS n FROM products")["n"]
+        return self.insert("INSERT INTO products(title,description,price,photo,sort) VALUES(?,?,?,?,?)",
+                      title, description, price, photo, nxt)
+
+    def move_product(self, pid, delta):
+        """Сдвигает товар на delta позиций в полном списке, включая скрытые.
+        delta=-1 выше, +1 ниже. Возвращает 'ok', 'top', 'bottom' или None, если товара нет."""
+        ids = [p["id"] for p in self.products(only_active=False)]
+        try:
+            i = ids.index(pid)
+        except ValueError:
+            return None
+        j = i + int(delta)
+        if j < 0:
+            return "top"
+        if j >= len(ids):
+            return "bottom"
+        ids[i], ids[j] = ids[j], ids[i]
+        for n, iid in enumerate(ids, start=1):
+            self.x("UPDATE products SET sort=? WHERE id=?", n, iid)
+        return "ok"
 
     def delete_product(self, pid):
         self.x("DELETE FROM cart WHERE product_id=?", pid)
@@ -402,7 +434,7 @@ class DB:
 
     def cart(self, uid):
         rows = self.q("""SELECT c.product_id, c.qty, p.title, p.price FROM cart c JOIN products p ON p.id=c.product_id
-                         WHERE c.user_id=? AND p.active=1 ORDER BY p.id""", uid)
+                         WHERE c.user_id=? AND p.active=1 ORDER BY p.sort, p.id""", uid)
         return rows, sum(r["qty"] * r["price"] for r in rows)
 
     def cart_clear(self, uid):
