@@ -73,7 +73,7 @@ def make_app(core, bot):
                                   "cart_count": sum(r["qty"] for r in db.cart(uid)[0])})
 
     async def days(request):
-        rows = db.days_with_slots(core.now(), 14)
+        rows = db.days_with_slots(core.now(), core.BOOKING_DAYS)
         return web.json_response([{"date": r["d"], "total": r["total"], "free": r["free"]} for r in rows])
 
     async def slots(request):
@@ -197,9 +197,9 @@ def make_app(core, bot):
     # ---------- admin ----------
     async def a_days(request):
         n = core.now()
-        stats = {r["d"]: r for r in db.days_with_slots(n.replace(hour=0, minute=0) - timedelta(minutes=1), 15)}
+        stats = {r["d"]: r for r in db.days_with_slots(n.replace(hour=0, minute=0) - timedelta(minutes=1), core.BOOKING_DAYS + 1)}
         out = []
-        for i in range(14):
+        for i in range(core.BOOKING_DAYS):
             d = (n.date() + timedelta(days=i)).isoformat()
             r = stats.get(d)
             booked = db.q1("""SELECT COUNT(*) c FROM bookings b JOIN slots s ON s.id=b.slot_id

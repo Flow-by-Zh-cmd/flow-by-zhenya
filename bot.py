@@ -45,6 +45,7 @@ if not DATABASE_URL and os.getenv("DATABASE_URL_ENC", "").strip():   # заши�
     from secretbox import decrypt
     DATABASE_URL = decrypt(os.environ["DATABASE_URL_ENC"].strip(), BOT_TOKEN)
 # задан = режим вебхука (хостинг). На Render берётся автоматически из RENDER_EXTERNAL_URL
+BOOKING_DAYS = int(os.getenv("BOOKING_DAYS", "30"))
 WEBHOOK_BASE_URL = (os.getenv("WEBHOOK_BASE_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -320,14 +321,14 @@ def days_kb(prefix, back=None, all_days=False):
     n = now()
     rows = []
     if all_days:
-        stats = {r["d"]: r for r in db.days_with_slots(n.replace(hour=0, minute=0) - timedelta(minutes=1), 15)}
-        for i in range(14):
+        stats = {r["d"]: r for r in db.days_with_slots(n.replace(hour=0, minute=0) - timedelta(minutes=1), BOOKING_DAYS + 1)}
+        for i in range(BOOKING_DAYS):
             d = (n.date() + timedelta(days=i)).isoformat()
             r = stats.get(d)
             label = fmt_day(d) + (f" · слотов {r['total']}" if r else " · нет слотов")
             rows.append([(label, f"{prefix}:{d}")])
     else:
-        for r in db.days_with_slots(n, 14):
+        for r in db.days_with_slots(n, BOOKING_DAYS):
             label = f"{fmt_day(r['d'])} · свободно {r['free']}" if r["free"] else f"{fmt_day(r['d'])} · всё занято"
             rows.append([(label, f"{prefix}:{r['d']}")])
     if back:
@@ -341,15 +342,15 @@ async def m_schedule(m: Message, state: FSMContext):
     await state.clear()
     markup, ok = days_kb("sd")
     if not ok:
-        await m.answer("Пока нет доступного времени на ближайшие 2 недели. Загляните позже 🙏")
+        await m.answer("Пока нет доступного времени на ближайший месяц. Загляните позже 🙏")
         return
-    await m.answer("📅 <b>Расписание на 2 недели</b>\nВыберите день:", reply_markup=markup)
+    await m.answer("📅 <b>Расписание на месяц</b>\nВыберите день:", reply_markup=markup)
 
 
 @router.callback_query(F.data == "sch")
 async def cb_schedule(cb: CallbackQuery):
     markup, ok = days_kb("sd")
-    await show(cb, "📅 <b>Расписание на 2 недели</b>\nВыберите день:" if ok else "Свободного времени пока нет.", markup)
+    await show(cb, "📅 <b>Расписание на месяц</b>\nВыберите день:" if ok else "Свободного времени пока нет.", markup)
     await cb.answer()
 
 
@@ -1061,6 +1062,7 @@ async def cb_tpl(cb: CallbackQuery):
     await show(cb, "🗓 <b>Шаблон расписания</b>\nСоздаёт почасовые слоты, начиная с завтрашнего дня. "
                    "Уже существующие слоты на то же время пропускаются.",
                kb([[("Пн–Пт 9:00–20:00 · 1 неделя", "atpl:1")], [("Пн–Пт 9:00–20:00 · 2 недели", "atpl:2")],
+                   [("Пн–Пт 9:00–20:00 · 4 недели", "atpl:4")],
                    [("✏️ Свои параметры", "atpl:custom")], [("⬅️ Назад", "adm")]]))
     await cb.answer()
 

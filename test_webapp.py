@@ -144,7 +144,7 @@ class WebAppTest(AioHTTPTestCase):
         st, j = await self.call("/api/admin/clear_free", {"date": day}, uid=OWNER)
         self.assertGreaterEqual(j["deleted"], 2)
         st, days = await self.call("/api/admin/days", uid=OWNER)
-        self.assertEqual(len(days), 14)
+        self.assertEqual(len(days), 30)
 
 
 if __name__ == "__main__":

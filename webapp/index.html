@@ -163,7 +163,7 @@ async function refreshMe(){ S.me = await api('/api/me'); renderNav(); }
 /* ---------- Расписание ---------- */
 async function viewSchedule(){
   const days = await api('/api/days');
-  if (!days.length){ $app.innerHTML = `<div class="empty"><div class="e">🗓</div>Свободного времени на ближайшие 2 недели пока нет.</div>`; return; }
+  if (!days.length){ $app.innerHTML = `<div class="empty"><div class="e">🗓</div>Свободного времени на ближайший месяц пока нет.</div>`; return; }
   if (!S.day || !days.find(d=>d.date===S.day)) S.day = (days.find(d=>d.free>0) || days[0]).date;
   const subLine = S.me.sub.left > 0 ? `Доступно занятий: <b>${S.me.sub.left}</b>` : `Нет активного абонемента — <a href="#" id="toSub" style="color:var(--link)">купить</a>`;
   $app.innerHTML = `
