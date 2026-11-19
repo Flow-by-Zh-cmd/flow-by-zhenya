@@ -8,7 +8,8 @@ from io import BytesIO
 
 from aiohttp import web
 
-from db import BookingError, ORDER_STATUSES, FMT, video_embed
+from db import (BookingError, ORDER_STATUSES, FMT, video_embed,
+                is_product_asset, resolve_product_asset, ASSET_PREFIX)
 from tgauth import validate_init_data, AuthError
 
 log = logging.getLogger("webapp")
@@ -210,23 +211,65 @@ def make_app(core, bot):
         await core.notify_plan_request(bot, uid, p, SRC)
         return ok(requested=True)
 
+    def product_photo_refs(p):
+        photos = db.product_photos(p["id"])
+        if photos:
+            return [x["file_id"] for x in photos]
+        return [p["photo"]] if p["photo"] else []
+
+    def product_photo_urls(p):
+        refs = product_photo_refs(p)
+        return [f"/api/photo/{p['id']}/{i}?v={abs(hash(ref)) % 10**8}" for i, ref in enumerate(refs)]
+
+    def asset_response(path):
+        ext = path.suffix.lower().lstrip(".")
+        ctypes = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                  "webp": "image/webp", "gif": "image/gif"}
+        resp = web.FileResponse(path)
+        resp.content_type = ctypes.get(ext, "application/octet-stream")
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+
+    async def send_photo_ref(ref):
+        if is_product_asset(ref):
+            try:
+                path = resolve_product_asset(ref)
+            except (ValueError, FileNotFoundError):
+                raise web.HTTPNotFound()
+            return asset_response(path)
+        if ref not in photo_cache:
+            buf = BytesIO()
+            f = await bot.get_file(ref)
+            await bot.download_file(f.file_path, buf)
+            photo_cache[ref] = buf.getvalue()
+        return web.Response(body=photo_cache[ref], content_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=86400"})
+
     async def products(request):
-        return web.json_response([{"id": p["id"], "title": p["title"], "description": p["description"],
-                                   "price": p["price"], "photo": f"/api/photo/{p['id']}?v={abs(hash(p['photo'])) % 10**8}"
-                                   if p["photo"] else None} for p in db.products()])
+        out = []
+        for p in db.products():
+            urls = product_photo_urls(p)
+            out.append({"id": p["id"], "title": p["title"], "description": p["description"],
+                        "price": p["price"], "photo": urls[0] if urls else None, "photos": urls})
+        return web.json_response(out)
 
     async def photo(request):
         p = db.get_product(int(request.match_info["pid"]))
-        if not p or not p["photo"] or not p["active"]:
+        if not p or not p["active"]:
             raise web.HTTPNotFound()
-        fid = p["photo"]
-        if fid not in photo_cache:
-            buf = BytesIO()
-            f = await bot.get_file(fid)
-            await bot.download_file(f.file_path, buf)
-            photo_cache[fid] = buf.getvalue()
-        return web.Response(body=photo_cache[fid], content_type="image/jpeg",
-                            headers={"Cache-Control": "public, max-age=86400"})
+        idx = int(request.match_info["idx"]) if "idx" in request.match_info else 0
+        refs = product_photo_refs(p)
+        if idx < 0 or idx >= len(refs):
+            raise web.HTTPNotFound()
+        return await send_photo_ref(refs[idx])
+
+    async def product_asset(request):
+        name = request.match_info["name"]
+        try:
+            path = resolve_product_asset(ASSET_PREFIX + name)
+        except (ValueError, FileNotFoundError):
+            raise web.HTTPNotFound()
+        return asset_response(path)
 
     def cart_json(uid):
         rows, total = db.cart(uid)
@@ -391,6 +434,8 @@ def make_app(core, bot):
     r.add_post("/api/buy", buy)
     r.add_get("/api/products", products)
     r.add_get("/api/photo/{pid}", photo)
+    r.add_get("/api/photo/{pid}/{idx}", photo)
+    r.add_get("/assets/products/{name}", product_asset)
     r.add_get("/api/cart", cart)
     r.add_post("/api/cart", cart_change)
     r.add_post("/api/order", order)

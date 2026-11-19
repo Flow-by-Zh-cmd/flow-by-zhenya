@@ -18,10 +18,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (CallbackQuery, Message, PreCheckoutQuery, LabeledPrice, InlineKeyboardMarkup,
                            InlineKeyboardButton as IB, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
                            BotCommand, WebAppInfo, MenuButtonWebApp,
-                           KeyboardButtonRequestUsers)
+                           KeyboardButtonRequestUsers, InputMediaPhoto, FSInputFile)
 from dotenv import load_dotenv
 
-from db import DB, BookingError, ORDER_STATUSES, FMT, facts_text
+from db import (DB, BookingError, ORDER_STATUSES, FMT, facts_text,
+                is_product_asset, resolve_product_asset)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(BASE, ".env")):
@@ -84,6 +85,45 @@ def money(kop):
     rub = kop / 100
     s = f"{rub:,.0f}" if kop % 100 == 0 else f"{rub:,.2f}"
     return s.replace(",", " ") + " ₽"
+
+
+def product_photo_refs(p):
+    photos = db.product_photos(p["id"])
+    if photos:
+        return [x["file_id"] for x in photos]
+    return [p["photo"]] if p["photo"] else []
+
+
+def tg_photo_file(ref):
+    """FSInputFile для asset: или file_id Telegram."""
+    try:
+        path = resolve_product_asset(ref)
+    except (ValueError, FileNotFoundError):
+        path = None
+    return FSInputFile(str(path)) if path else ref
+
+
+_album_buf = {}
+
+
+async def collect_photo_refs(m: Message):
+    """Список file_id из одного фото или альбома. None — не первое сообщение альбома (пропустить).
+    Пустой список — пользователь прислал «-»."""
+    if m.text and m.text.strip() == "-":
+        return []
+    if not m.photo:
+        raise ValueError("Пришлите фото, альбом или «-».")
+    ref = m.photo[-1].file_id
+    gid = m.media_group_id
+    if not gid:
+        return [ref]
+    bucket = _album_buf.setdefault(gid, {"refs": [], "owner": None})
+    bucket["refs"].append(ref)
+    if bucket["owner"] is None:
+        bucket["owner"] = id(m)
+        await asyncio.sleep(1.2)
+        return _album_buf.pop(gid, bucket)["refs"]
+    return None
 
 
 def fmt_day(d):
@@ -250,6 +290,10 @@ class NewProduct(StatesGroup):
     description = State()
     price = State()
     photo = State()
+
+
+class ProductPhotos(StatesGroup):
+    add = State()
 
 
 class EditField(StatesGroup):
@@ -656,9 +700,17 @@ async def cb_product(cb: CallbackQuery):
         return
     text = f"<b>{e(p['title'])}</b>\n\n{e(p['description'])}\n\nЦена: <b>{money(p['price'])}</b>"
     markup = kb([[("➕ В корзину", f"ca:{p['id']}")], [("🛒 Корзина", "cart"), ("⬅️ Каталог", "shop")]])
-    if p["photo"]:
+    refs = product_photo_refs(p)
+    if refs:
         try:
-            await cb.message.answer_photo(p["photo"], caption=text, reply_markup=markup)
+            if len(refs) == 1:
+                await cb.message.answer_photo(tg_photo_file(refs[0]), caption=text, reply_markup=markup)
+            else:
+                media = []
+                for i, ref in enumerate(refs[:10]):
+                    media.append(InputMediaPhoto(media=tg_photo_file(ref), caption=text if i == 0 else None))
+                await cb.message.answer_media_group(media)
+                await cb.message.answer("Выберите действие:", reply_markup=markup)
             await cb.answer()
             return
         except Exception as ex:
@@ -1509,15 +1561,48 @@ def product_card(pid):
         return None, None
     ids = [x["id"] for x in db.products(only_active=False)]
     pos = ids.index(pid) + 1 if pid in ids else "?"
+    nphoto = len(db.product_photos(pid)) or (1 if p["photo"] else 0)
     t = (f"🛍 <b>{e(p['title'])}</b>\n{e(p['description'])}\nЦена: {money(p['price'])}\n"
-         f"Фото: {'есть' if p['photo'] else 'нет'}\nСтатус: {'виден клиентам' if p['active'] else 'скрыт'}\n"
+         f"Фото: {nphoto}\nСтатус: {'виден клиентам' if p['active'] else 'скрыт'}\n"
          f"Позиция: {pos} из {len(ids)}")
     k = kb([[("✏️ Название", f"aed:products:{pid}:title"), ("✏️ Описание", f"aed:products:{pid}:description")],
-            [("✏️ Цена", f"aed:products:{pid}:price"), ("🖼 Фото", f"aed:products:{pid}:photo")],
+            [("✏️ Цена", f"aed:products:{pid}:price"), ("🖼 Фото", f"aph:{pid}")],
             [("⬆️ Выше", f"apm:u:{pid}"), ("⬇️ Ниже", f"apm:d:{pid}")],
             [("👁 Скрыть/показать", f"atg:products:{pid}"), ("🗑 Удалить", f"adp:products:{pid}")],
             [("⬅️ К товарам", "adm_products")]])
     return t, k
+
+
+def product_photos_view(pid):
+    p = db.get_product(pid)
+    if not p:
+        return None, None
+    photos = db.product_photos(pid)
+    t = f"🖼 <b>Фото — {e(p['title'])}</b>\nСейчас: {len(photos)}"
+    if not photos:
+        t += "\nПока нет фото. Можно прислать одно фото или альбом — они добавятся в конец, текущая обложка не заменится."
+    rows = []
+    for i, ph in enumerate(photos, 1):
+        kind = "файл" if is_product_asset(ph["file_id"]) else "Telegram"
+        rows.append([(f"{i}. {kind}", f"aphi:{ph['id']}")])
+    rows.append([("➕ Добавить фото или альбом", f"aphadd:{pid}")])
+    rows.append([("⬅️ К товару", f"apr:{pid}")])
+    return t, kb(rows)
+
+
+def product_photo_item_view(photoid):
+    ph = db.get_product_photo(photoid)
+    if not ph:
+        return None, None
+    photos = db.product_photos(ph["product_id"])
+    pos = [x["id"] for x in photos].index(photoid) + 1 if photoid in [x["id"] for x in photos] else "?"
+    kind = "серверный файл" if is_product_asset(ph["file_id"]) else "фото из Telegram"
+    t = f"🖼 <b>Фото {pos} из {len(photos)}</b>\nТип: {kind}"
+    k = kb([[("⬆️ Выше", f"aphm:u:{photoid}"), ("⬇️ Ниже", f"aphm:d:{photoid}")],
+            [("🗑 Удалить", f"aphdel:{photoid}")],
+            [("⬅️ К фото", f"aph:{ph['product_id']}")]])
+    return t, k
+
 
 
 def card(table, rid):
@@ -1538,6 +1623,107 @@ async def cb_adm_products(cb: CallbackQuery, state: FSMContext):
     t, k = products_admin_view()
     await show(cb, t, k)
     await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("aph:"))
+async def cb_adm_photos(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    t, k = product_photos_view(int(cb.data.split(":")[1]))
+    if not t:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    await show(cb, t, k)
+    await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("aphi:"))
+async def cb_adm_photo_item(cb: CallbackQuery):
+    t, k = product_photo_item_view(int(cb.data.split(":")[1]))
+    if not t:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    await show(cb, t, k)
+    await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("aphm:"))
+async def cb_adm_photo_move(cb: CallbackQuery):
+    _, direction, photoid = cb.data.split(":")
+    result = db.move_product_photo(int(photoid), -1 if direction == "u" else 1)
+    if result is None:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    if result == "top":
+        await cb.answer("Уже первое")
+        return
+    if result == "bottom":
+        await cb.answer("Уже последнее")
+        return
+    t, k = product_photo_item_view(int(photoid))
+    await show(cb, t, k)
+    await cb.answer("Готово")
+
+
+@admin.callback_query(F.data.startswith("aphdel:"))
+async def cb_adm_photo_del(cb: CallbackQuery):
+    photoid = int(cb.data.split(":")[1])
+    ph = db.get_product_photo(photoid)
+    if not ph:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    await show(cb, "Удалить это фото? Обложка не затронется, если останутся другие.",
+               kb([[("🗑 Удалить", f"aphdelok:{photoid}"), ("Нет", f"aphi:{photoid}")]]))
+    await cb.answer()
+
+
+@admin.callback_query(F.data.startswith("aphdelok:"))
+async def cb_adm_photo_del_ok(cb: CallbackQuery):
+    photoid = int(cb.data.split(":")[1])
+    ph = db.get_product_photo(photoid)
+    if not ph:
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    pid = ph["product_id"]
+    db.delete_product_photo(photoid)
+    t, k = product_photos_view(pid)
+    await show(cb, t, k)
+    await cb.answer("Удалено")
+
+
+@admin.callback_query(F.data.startswith("aphadd:"))
+async def cb_adm_photo_add(cb: CallbackQuery, state: FSMContext):
+    pid = int(cb.data.split(":")[1])
+    if not db.get_product(pid):
+        await cb.answer("Не найдено", show_alert=True)
+        return
+    await state.set_state(ProductPhotos.add)
+    await state.update_data(pid=pid)
+    await cb.message.answer("Пришлите одно фото или альбом — кадры добавятся в конец списка.\n/cancel — отмена.")
+    await cb.answer()
+
+
+@admin.message(ProductPhotos.add)
+async def st_add_photos(m: Message, state: FSMContext):
+    try:
+        refs = await collect_photo_refs(m)
+    except ValueError as ex:
+        await m.answer(str(ex) + "\n/cancel — отмена.")
+        return
+    if refs is None:
+        return
+    if not refs:
+        await m.answer("Чтобы убрать фото, откройте кадр и нажмите «Удалить».")
+        return
+    data = await state.get_data()
+    await state.clear()
+    pid = data["pid"]
+    added = 0
+    for ref in refs:
+        if db.add_product_photo(pid, ref):
+            added += 1
+    t, k = product_photos_view(pid)
+    await m.answer(f"✅ Добавлено фото: {added}.\n\n" + (t or ""), reply_markup=k)
+
 
 
 @admin.callback_query(F.data.startswith("apl:") | F.data.startswith("apr:"))
@@ -1729,19 +1915,23 @@ async def st_npr_price(m: Message, state: FSMContext):
         await m.answer(str(ex))
         return
     await state.set_state(NewProduct.photo)
-    await m.answer("Пришлите фото товара или <code>-</code>, если без фото.")
+    await m.answer("Пришлите фото товара, альбом или <code>-</code>, если без фото.")
 
 
 @admin.message(NewProduct.photo)
 async def st_npr_photo(m: Message, state: FSMContext):
     try:
-        photo = parse_value("photo", m)
+        refs = await collect_photo_refs(m)
     except ValueError as ex:
         await m.answer(str(ex))
         return
+    if refs is None:
+        return
     d = await state.get_data()
     await state.clear()
-    pid = db.add_product(d["title"], d["description"], d["price"], photo)
+    pid = db.add_product(d["title"], d["description"], d["price"], refs[0] if refs else None)
+    for ref in refs[1:]:
+        db.add_product_photo(pid, ref)
     t, k = product_card(pid)
     await m.answer("✅ Товар добавлен.\n\n" + t, reply_markup=k)
 

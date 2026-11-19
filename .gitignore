@@ -12,3 +12,5 @@ bin/
 tunnel-npm/
 old_menu_button.txt
 .neon_url
+
+webapp/assets/products/_test-*

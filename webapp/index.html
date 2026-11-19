@@ -65,6 +65,14 @@ main{padding:6px 12px 16px}
 .prod{background:var(--card);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column}
 .prod .img{aspect-ratio:1/1;background:var(--soft);display:flex;align-items:center;justify-content:center;font-size:40px}
 .prod .img img{width:100%;height:100%;object-fit:cover}
+.prod .imgs{aspect-ratio:1/1;background:var(--soft);display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.prod .imgs::-webkit-scrollbar{display:none}
+.prod .imgs img{flex:0 0 100%;width:100%;height:100%;object-fit:cover;scroll-snap-align:start;cursor:pointer}
+.prod .dots{display:flex;justify-content:center;gap:4px;padding:6px 0 0}
+.prod .dots i{width:6px;height:6px;border-radius:50%;background:var(--sep);display:block}
+.prod .dots i.on{background:var(--accent)}
+.lb{touch-action:pan-y}
+.lb .nav{position:absolute;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:16px}
 .prod .b{padding:10px;display:flex;flex-direction:column;gap:6px;flex:1}
 .prod .ti{font-weight:600;font-size:14px}
 .prod .de{font-size:12px;color:var(--hint);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -354,12 +362,42 @@ function openInvoice(url, done){
 }
 
 /* ---------- Магазин ---------- */
+function productImgs(p){
+  const urls = (p.photos && p.photos.length) ? p.photos : (p.photo ? [p.photo] : []);
+  if (!urls.length) return `<div class="img">🏋️</div>`;
+  const dots = urls.length > 1 ? `<div class="dots">${urls.map((_,i)=>`<i${i===0?' class="on"':''}></i>`).join('')}</div>` : '';
+  return `<div class="imgs">${urls.map((u,i)=>`<img src="${esc(u)}" alt="" loading="${i?'lazy':'eager'}">`).join('')}</div>${dots}`;
+}
+function shopLightbox(urls, start){
+  let i = start;
+  const bg = document.createElement('div'); bg.className = 'lb';
+  const pic = document.createElement('img');
+  const show = () => { pic.src = urls[i]; };
+  show();
+  bg.appendChild(pic);
+  if (urls.length > 1){
+    const nav = document.createElement('div'); nav.className = 'nav';
+    nav.innerHTML = `<button type="button" class="btn sm" data-d="-1">‹</button><button type="button" class="btn sm" data-d="1">›</button>`;
+    bg.appendChild(nav);
+    const step = d => { i = (i + d + urls.length) % urls.length; show(); };
+    nav.onclick = ev => { ev.stopPropagation(); const b = ev.target.closest('[data-d]'); if (b) step(+b.dataset.d); };
+    let x0 = null;
+    bg.addEventListener('touchstart', ev => { x0 = ev.changedTouches[0].clientX; }, {passive:true});
+    bg.addEventListener('touchend', ev => {
+      if (x0 == null) return;
+      const dx = ev.changedTouches[0].clientX - x0; x0 = null;
+      if (Math.abs(dx) > 40) step(dx < 0 ? 1 : -1);
+    });
+  }
+  bg.onclick = ev => { if (ev.target === bg || ev.target === pic) bg.remove(); };
+  document.body.appendChild(bg);
+}
 async function viewShop(){
   const [prods, cart] = await Promise.all([api('/api/products'), api('/api/cart')]);
   S.shopCart = cart;
   const q = id => (cart.items.find(i => i.product_id === id) || {}).qty || 0;
   if (!prods.length){ $app.innerHTML = '<div class="empty"><div class="e">🛍</div>Магазин пока пуст</div>'; return; }
-  $app.innerHTML = `<div class="products">${prods.map(p => `<div class="prod"><div class="img">${p.photo ? `<img src="${p.photo}" alt="" loading="lazy">` : '🏋️'}</div>
+  $app.innerHTML = `<div class="products">${prods.map(p => `<div class="prod">${productImgs(p)}
      <div class="b"><div class="ti">${esc(p.title)}</div><div class="de">${esc(p.description)}</div><div class="pr">${rub(p.price)}</div>
      ${q(p.id) ? `<div class="qty"><button data-d="-1" data-p="${p.id}">−</button><b>${q(p.id)}</b><button data-d="1" data-p="${p.id}">+</button></div>` : `<button class="btn sm" style="width:100%" data-d="1" data-p="${p.id}">В корзину</button>`}
      </div></div>`).join('')}</div>
@@ -367,6 +405,16 @@ async function viewShop(){
   $app.querySelectorAll('[data-p]').forEach(b => b.onclick = async () => {
     tap(); b.disabled = true;
     try { await api('/api/cart', {product_id:+b.dataset.p, delta:+b.dataset.d}); await refreshMe(); await viewShop(); } catch(e){ alertBox(e.message); }
+  });
+  $app.querySelectorAll('.prod').forEach(card => {
+    const el = card.querySelector('.imgs'); if (!el) return;
+    const dots = card.querySelectorAll('.dots i');
+    const imgs = [...el.querySelectorAll('img')];
+    el.addEventListener('scroll', () => {
+      const i = Math.round(el.scrollLeft / Math.max(el.clientWidth, 1));
+      dots.forEach((d,j) => d.classList.toggle('on', j===i));
+    }, {passive:true});
+    imgs.forEach((img, idx) => img.onclick = ev => { ev.preventDefault(); shopLightbox(imgs.map(x=>x.src), idx); });
   });
   document.getElementById('checkout')?.addEventListener('click', checkoutSheet);
 }

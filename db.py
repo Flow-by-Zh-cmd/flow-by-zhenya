@@ -4,8 +4,11 @@
 SQL пишется в одном диалекте (плейсхолдеры `?`), для Postgres он переводится в `%s`."""
 import json
 import logging
+import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, date
+from pathlib import Path
 
 log = logging.getLogger("db")
 
@@ -32,6 +35,9 @@ CREATE INDEX IF NOT EXISTS ix_book_slot ON bookings(slot_id, status);
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, price INTEGER,
     photo TEXT, active INTEGER DEFAULT 1, sort INTEGER);
+CREATE TABLE IF NOT EXISTS product_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, file_id TEXT NOT NULL, sort INTEGER);
+CREATE INDEX IF NOT EXISTS ix_product_photos_pid ON product_photos(product_id, sort, id);
 CREATE TABLE IF NOT EXISTS cart (user_id INTEGER, product_id INTEGER, qty INTEGER,
     PRIMARY KEY (user_id, product_id));
 CREATE TABLE IF NOT EXISTS orders (
@@ -66,6 +72,9 @@ CREATE TABLE IF NOT EXISTS bookings (
 CREATE INDEX IF NOT EXISTS ix_book_slot ON bookings(slot_id, status);
 CREATE TABLE IF NOT EXISTS products (
     id BIGSERIAL PRIMARY KEY, title TEXT, description TEXT, price BIGINT, photo TEXT, active INTEGER DEFAULT 1, sort INTEGER);
+CREATE TABLE IF NOT EXISTS product_photos (
+    id BIGSERIAL PRIMARY KEY, product_id BIGINT NOT NULL, file_id TEXT NOT NULL, sort INTEGER);
+CREATE INDEX IF NOT EXISTS ix_product_photos_pid ON product_photos(product_id, sort, id);
 CREATE TABLE IF NOT EXISTS cart (user_id BIGINT, product_id BIGINT, qty INTEGER, PRIMARY KEY (user_id, product_id));
 CREATE TABLE IF NOT EXISTS orders (
     id BIGSERIAL PRIMARY KEY, user_id BIGINT, items TEXT, total BIGINT, delivery TEXT, address TEXT, phone TEXT,
@@ -78,7 +87,7 @@ CREATE TABLE IF NOT EXISTS about_media (
     caption TEXT, section TEXT NOT NULL, sort INTEGER, title TEXT, body TEXT);
 """
 
-TABLES = ["settings", "users", "slots", "plans", "subscriptions", "bookings", "products", "cart", "orders", "payments", "about_media"]
+TABLES = ["settings", "users", "slots", "plans", "subscriptions", "bookings", "products", "product_photos", "cart", "orders", "payments", "about_media"]
 
 ORDER_STATUSES = {
     "new": "Новый", "confirmed": "Подтверждён", "shipped": "Передан в доставку",
@@ -90,6 +99,52 @@ FMT = "%Y-%m-%d %H:%M"
 ABOUT_FIELDS = {"title", "tagline", "description", "facts", "cover"}
 ABOUT_MEDIA_KINDS = {"photo", "video", "link"}
 ABOUT_SECTIONS = {"gallery", "portfolio"}
+
+ASSET_PREFIX = "asset:"
+PRODUCT_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp", "assets", "products")
+_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,120}\.(?:jpg|jpeg|png|webp|gif)$", re.I)
+
+
+def is_safe_asset_name(name):
+    """Имя файла из webapp/assets/products/: без путей, URL и «..»."""
+    return bool(name) and bool(_ASSET_NAME_RE.fullmatch(name)) and "/" not in name and "\\" not in name and ".." not in name
+
+
+def is_product_asset(file_id):
+    return bool(file_id) and str(file_id).startswith(ASSET_PREFIX)
+
+
+def resolve_product_asset(file_id, base_dir=None):
+    """Путь к серверному файлу товара или None, если это не asset-ссылка.
+    ValueError — небезопасное имя, FileNotFoundError — файла нет."""
+    if not is_product_asset(file_id):
+        return None
+    name = str(file_id)[len(ASSET_PREFIX):]
+    if not is_safe_asset_name(name):
+        raise ValueError("bad asset")
+    base = Path(base_dir or PRODUCT_ASSETS_DIR).resolve()
+    path = (base / name).resolve()
+    if base not in path.parents and path != base:
+        raise ValueError("bad asset")
+    if not path.is_file():
+        raise FileNotFoundError(name)
+    return path
+
+
+def normalize_photo_ref(file_id):
+    """Проверяет Telegram file_id или asset:имя. Чужие URL не принимаются."""
+    if file_id is None or not str(file_id).strip():
+        raise ValueError("empty photo")
+    s = str(file_id).strip()
+    if is_product_asset(s):
+        name = s[len(ASSET_PREFIX):]
+        if not is_safe_asset_name(name):
+            raise ValueError("bad asset")
+        return ASSET_PREFIX + name
+    if "://" in s or "/" in s or "\\" in s or s.startswith(".") or len(s) > 256:
+        raise ValueError("bad photo ref")
+    return s
+
 
 
 class BookingError(Exception):
@@ -223,6 +278,11 @@ class DB:
         if "sort" not in self._column_names("products"):
             self.x("ALTER TABLE products ADD COLUMN sort INTEGER")
         self.x("UPDATE products SET sort = id WHERE sort IS NULL")
+        # одно фото из products.photo -> первый кадр галереи, без дублей при повторном старте
+        self.x("""INSERT INTO product_photos(product_id, file_id, sort)
+                  SELECT id, photo, 1 FROM products p
+                  WHERE photo IS NOT NULL AND trim(photo) <> ''
+                    AND NOT EXISTS (SELECT 1 FROM product_photos pp WHERE pp.product_id = p.id)""")
 
     # ---------- settings / owner ----------
     def get_setting(self, key, default=None):
@@ -457,8 +517,12 @@ class DB:
 
     def add_product(self, title, description, price, photo=None):
         nxt = self.q1("SELECT COALESCE(MAX(sort), 0) + 1 AS n FROM products")["n"]
-        return self.insert("INSERT INTO products(title,description,price,photo,sort) VALUES(?,?,?,?,?)",
-                      title, description, price, photo, nxt)
+        cover = normalize_photo_ref(photo) if photo else None
+        pid = self.insert("INSERT INTO products(title,description,price,photo,sort) VALUES(?,?,?,?,?)",
+                      title, description, price, cover, nxt)
+        if cover:
+            self.add_product_photo(pid, cover)
+        return pid
 
     def move_product(self, pid, delta):
         """Сдвигает товар на delta позиций в полном списке, включая скрытые.
@@ -479,8 +543,62 @@ class DB:
         return "ok"
 
     def delete_product(self, pid):
+        self.x("DELETE FROM product_photos WHERE product_id=?", pid)
         self.x("DELETE FROM cart WHERE product_id=?", pid)
         self.x("DELETE FROM products WHERE id=?", pid)
+
+    def product_photos(self, pid):
+        return self.q("SELECT * FROM product_photos WHERE product_id=? ORDER BY sort, id", pid)
+
+    def get_product_photo(self, photoid):
+        return self.q1("SELECT * FROM product_photos WHERE id=?", photoid)
+
+    def _sync_product_cover(self, pid):
+        first = self.q1("SELECT file_id FROM product_photos WHERE product_id=? ORDER BY sort, id LIMIT 1", pid)
+        self.x("UPDATE products SET photo=? WHERE id=?", first["file_id"] if first else None, pid)
+
+    def add_product_photo(self, pid, file_id):
+        """Добавляет кадр в конец галереи. Обложку (первое фото) не заменяет.
+        Повтор той же ссылки для этого товара игнорируется."""
+        if not self.get_product(pid):
+            return None
+        ref = normalize_photo_ref(file_id)
+        found = self.q1("SELECT id FROM product_photos WHERE product_id=? AND file_id=?", pid, ref)
+        if found:
+            return found["id"]
+        nxt = self.q1("SELECT COALESCE(MAX(sort), 0) + 1 AS n FROM product_photos WHERE product_id=?", pid)["n"]
+        mid = self.insert("INSERT INTO product_photos(product_id,file_id,sort) VALUES(?,?,?)", pid, ref, nxt)
+        self._sync_product_cover(pid)
+        return mid
+
+    def delete_product_photo(self, photoid):
+        row = self.get_product_photo(photoid)
+        if not row:
+            return None
+        self.x("DELETE FROM product_photos WHERE id=?", photoid)
+        self._sync_product_cover(row["product_id"])
+        return "ok"
+
+    def move_product_photo(self, photoid, delta):
+        """Сдвигает фото внутри товара. delta=-1 левее/выше, +1 правее/ниже."""
+        item = self.get_product_photo(photoid)
+        if not item:
+            return None
+        ids = [p["id"] for p in self.product_photos(item["product_id"])]
+        try:
+            i = ids.index(photoid)
+        except ValueError:
+            return None
+        j = i + int(delta)
+        if j < 0:
+            return "top"
+        if j >= len(ids):
+            return "bottom"
+        ids[i], ids[j] = ids[j], ids[i]
+        for n, iid in enumerate(ids, start=1):
+            self.x("UPDATE product_photos SET sort=? WHERE id=?", n, iid)
+        self._sync_product_cover(item["product_id"])
+        return "ok"
 
     def cart_add(self, uid, pid, delta=1):
         self.x("""INSERT INTO cart(user_id,product_id,qty) VALUES(?,?,?)

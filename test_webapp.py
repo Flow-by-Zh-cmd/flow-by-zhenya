@@ -32,7 +32,7 @@ class WebAppTest(AioHTTPTestCase):
     async def get_application(self):
         self.fb = FakeBot()
         core.db.conn.executescript("DELETE FROM slots; DELETE FROM bookings; DELETE FROM subscriptions; DELETE FROM orders;"
-                                   "DELETE FROM cart; DELETE FROM settings; DELETE FROM plans; DELETE FROM products;"
+                                   "DELETE FROM cart; DELETE FROM settings; DELETE FROM plans; DELETE FROM product_photos; DELETE FROM products;"
                                    "DELETE FROM about_media; DELETE FROM sqlite_sequence;")
         core.db.seed_if_empty(core.now().date())
         core.db.claim_owner(OWNER)
@@ -150,6 +150,50 @@ class WebAppTest(AioHTTPTestCase):
         self.assertEqual(j["title"], "Новое имя")
         self.assertEqual(j["gallery"][0]["embed"], "https://www.youtube.com/embed/abcdefghijk")
         self.assertEqual(j["portfolio"][0]["title"], "Кейс (пример)")
+
+    async def test_product_photos_api_and_assets(self):
+        import shutil
+        from pathlib import Path
+        import db as dbmod
+        src_dir = Path(__file__).resolve().parent / "webapp" / "fixtures"
+        dest_dir = Path(dbmod.PRODUCT_ASSETS_DIR)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        a = dest_dir / "_test-a.jpg"
+        b = dest_dir / "_test-b.jpg"
+        shutil.copy(src_dir / "product-a.jpg", a)
+        shutil.copy(src_dir / "product-b.jpg", b)
+        try:
+            pid = core.db.add_product("Свеча тест", "описание", 12300, "asset:_test-a.jpg")
+            core.db.add_product_photo(pid, "asset:_test-b.jpg")
+            self.assertEqual(core.db.get_product(pid)["photo"], "asset:_test-a.jpg")
+            st, prods = await self.call("/api/products")
+            self.assertEqual(st, 200)
+            item = next(x for x in prods if x["id"] == pid)
+            self.assertEqual(len(item["photos"]), 2)
+            self.assertEqual(item["photo"], item["photos"][0])
+            self.assertTrue(item["photos"][0].startswith(f"/api/photo/{pid}/0"))
+            self.assertTrue(item["photos"][1].startswith(f"/api/photo/{pid}/1"))
+            r0 = await self.client.get(item["photos"][0].split("?")[0])
+            r1 = await self.client.get(item["photos"][1].split("?")[0])
+            self.assertEqual(r0.status, 200)
+            self.assertEqual(r1.status, 200)
+            self.assertEqual(await r0.read(), a.read_bytes())
+            self.assertEqual(await r1.read(), b.read_bytes())
+            # старый URL обложки тоже работает
+            r_old = await self.client.get(f"/api/photo/{pid}")
+            self.assertEqual(r_old.status, 200)
+            self.assertEqual(await r_old.read(), a.read_bytes())
+            # прямая раздача серверного файла
+            ra = await self.client.get("/assets/products/_test-a.jpg")
+            self.assertEqual(ra.status, 200)
+            self.assertEqual(await ra.read(), a.read_bytes())
+            # path traversal / чужой URL не обслуживаются
+            self.assertEqual((await self.client.get("/assets/products/../index.html")).status, 404)
+            self.assertEqual((await self.client.get("/assets/products/%2e%2e%2findex.html")).status, 404)
+            self.assertEqual((await self.client.get("/api/photo/%d/9" % pid)).status, 404)
+        finally:
+            a.unlink(missing_ok=True)
+            b.unlink(missing_ok=True)
 
     async def test_admin_schedule(self):
         day = (core.now().date() + timedelta(days=3)).isoformat()

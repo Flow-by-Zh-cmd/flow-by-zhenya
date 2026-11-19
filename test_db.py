@@ -1,4 +1,5 @@
 import os, tempfile, unittest
+from pathlib import Path
 from datetime import datetime, timedelta, date
 from db import DB, BookingError, parse_facts, facts_text, video_embed
 
@@ -275,6 +276,85 @@ class T(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.update_field("plans", pid, "id; DROP", 1)
 
+
+    def test_product_photos_crud_and_cover(self):
+        p = self.db.add_product("A", "d", 100, "TgFileAAA")
+        self.assertEqual([x["file_id"] for x in self.db.product_photos(p)], ["TgFileAAA"])
+        self.assertEqual(self.db.get_product(p)["photo"], "TgFileAAA")
+        self.db.add_product_photo(p, "TgFileBBB")
+        self.assertEqual([x["file_id"] for x in self.db.product_photos(p)], ["TgFileAAA", "TgFileBBB"])
+        self.assertEqual(self.db.get_product(p)["photo"], "TgFileAAA")  # обложка не заменяется
+        # повтор той же ссылки не создаёт дубль
+        first = self.db.product_photos(p)[0]["id"]
+        self.assertEqual(self.db.add_product_photo(p, "TgFileAAA"), first)
+        self.assertEqual(len(self.db.product_photos(p)), 2)
+        b = self.db.product_photos(p)[1]["id"]
+        self.assertEqual(self.db.move_product_photo(b, -1), "ok")
+        self.assertEqual([x["file_id"] for x in self.db.product_photos(p)], ["TgFileBBB", "TgFileAAA"])
+        self.assertEqual(self.db.get_product(p)["photo"], "TgFileBBB")
+        self.assertEqual(self.db.move_product_photo(b, -1), "top")
+        self.assertEqual(self.db.move_product_photo(self.db.product_photos(p)[-1]["id"], 1), "bottom")
+        self.db.add_product_photo(p, "asset:ok-name.jpg")
+        self.assertEqual(len(self.db.product_photos(p)), 3)
+        with self.assertRaises(ValueError):
+            self.db.add_product_photo(p, "asset:../etc/passwd")
+        with self.assertRaises(ValueError):
+            self.db.add_product_photo(p, "https://evil.example/x.jpg")
+        with self.assertRaises(ValueError):
+            self.db.add_product_photo(p, "asset:foo/bar.jpg")
+        with self.assertRaises(ValueError):
+            self.db.add_product_photo(p, "asset:ok-name.jpg.exe")
+        last = self.db.product_photos(p)[-1]["id"]
+        self.db.delete_product_photo(last)
+        self.assertEqual(len(self.db.product_photos(p)), 2)
+        self.assertEqual(self.db.get_product(p)["photo"], "TgFileBBB")
+        self.db.delete_product(p)
+        self.assertEqual(self.db.product_photos(p), [])
+
+    def test_product_photos_migration_preserves_single(self):
+        import sqlite3
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            CREATE TABLE products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, price INTEGER,
+                photo TEXT, active INTEGER DEFAULT 1, sort INTEGER);
+            INSERT INTO products(title,description,price,photo,sort) VALUES('X','d',1,'CoverFile',1);
+            INSERT INTO products(title,description,price,photo,sort) VALUES('Y','d',2,NULL,2);
+        """)
+        conn.close()
+        db = DB(path)
+        try:
+            x = [p for p in db.products(only_active=False) if p["title"] == "X"][0]
+            y = [p for p in db.products(only_active=False) if p["title"] == "Y"][0]
+            self.assertEqual([ph["file_id"] for ph in db.product_photos(x["id"])], ["CoverFile"])
+            self.assertEqual(x["photo"], "CoverFile")
+            self.assertEqual(db.product_photos(y["id"]), [])
+            # повторная миграция при новом подключении не дублирует
+            db.conn.close()
+            db = DB(path)
+            self.assertEqual(len(db.product_photos(x["id"])), 1)
+            self.assertEqual(db.get_product(x["id"])["photo"], "CoverFile")
+        finally:
+            db.conn.close()
+            os.remove(path)
+
+    def test_resolve_product_asset_safe_path(self):
+        from db import resolve_product_asset, is_safe_asset_name, PRODUCT_ASSETS_DIR
+        base = Path(tempfile.mkdtemp())
+        (base / "ok-name.jpg").write_bytes(b"fakeimg")
+        try:
+            self.assertTrue(is_safe_asset_name("ok-name.jpg"))
+            path = resolve_product_asset("asset:ok-name.jpg", base_dir=base)
+            self.assertEqual(path.read_bytes(), b"fakeimg")
+            self.assertIsNone(resolve_product_asset("TgFileAAA", base_dir=base))
+            with self.assertRaises(ValueError):
+                resolve_product_asset("asset:../ok-name.jpg", base_dir=base)
+            with self.assertRaises(FileNotFoundError):
+                resolve_product_asset("asset:missing.jpg", base_dir=base)
+        finally:
+            import shutil
+            shutil.rmtree(base)
 
 @unittest.skipUnless(PG_URL, "TEST_DATABASE_URL не задан")
 class TPostgres(T):

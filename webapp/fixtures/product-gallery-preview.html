@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Превью: галерея товара (фикстуры)</title>
+<style>
+:root{--card:#fff;--soft:#eee;--sep:#ddd;--accent:#2f6b3a;--hint:#667;--r:16px;--text:#222;--bg:#f4f1ea}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--text);padding:16px}
+h1{font-size:18px;margin:0 0 8px}
+.note{color:var(--hint);font-size:13px;margin:0 0 16px}
+.products{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px}
+.prod{background:var(--card);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column;box-shadow:0 1px 8px rgba(0,0,0,.06)}
+.prod .img{aspect-ratio:1/1;background:var(--soft);display:flex;align-items:center;justify-content:center;font-size:40px}
+.prod .imgs{aspect-ratio:1/1;background:var(--soft);display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.prod .imgs::-webkit-scrollbar{display:none}
+.prod .imgs img{flex:0 0 100%;width:100%;height:100%;object-fit:cover;scroll-snap-align:start;cursor:pointer}
+.prod .dots{display:flex;justify-content:center;gap:4px;padding:6px 0 0}
+.prod .dots i{width:6px;height:6px;border-radius:50%;background:var(--sep);display:block}
+.prod .dots i.on{background:var(--accent)}
+.prod .b{padding:10px;display:flex;flex-direction:column;gap:6px}
+.prod .ti{font-weight:600;font-size:14px}
+.prod .de{font-size:12px;color:var(--hint)}
+.prod .pr{font-weight:800}
+.lb{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:30;display:flex;align-items:center;justify-content:center;padding:16px;touch-action:pan-y}
+.lb img{max-width:100%;max-height:100%;border-radius:8px}
+.lb .nav{position:absolute;left:0;right:0;bottom:24px;display:flex;justify-content:center;gap:16px}
+.btn{border:0;background:#fff;color:#111;border-radius:10px;padding:8px 14px;font-size:18px}
+</style>
+</head>
+<body>
+<h1>Превью галереи товара</h1>
+<p class="note">Локальные фикстуры, без продакшен-данных и без авторизации. Листайте фото горизонтальным свайпом, нажмите для увеличения.</p>
+<div class="products">
+  <div class="prod" id="card">
+    <div class="imgs">
+      <img src="product-a.jpg" alt="Фикстура A">
+      <img src="product-b.jpg" alt="Фикстура B">
+    </div>
+    <div class="dots"><i class="on"></i><i></i></div>
+    <div class="b">
+      <div class="ti">Товар-фикстура (не из магазина)</div>
+      <div class="de">Два тестовых кадра. Обложка — первый, второй не заменяет её.</div>
+      <div class="pr">0 ₽</div>
+    </div>
+  </div>
+</div>
+<script>
+function shopLightbox(urls, start){
+  let i = start;
+  const bg = document.createElement('div'); bg.className = 'lb';
+  const pic = document.createElement('img');
+  const show = () => { pic.src = urls[i]; };
+  show();
+  bg.appendChild(pic);
+  const nav = document.createElement('div'); nav.className = 'nav';
+  nav.innerHTML = '<button type="button" class="btn" data-d="-1">‹</button><button type="button" class="btn" data-d="1">›</button>';
+  bg.appendChild(nav);
+  const step = d => { i = (i + d + urls.length) % urls.length; show(); };
+  nav.onclick = ev => { ev.stopPropagation(); const b = ev.target.closest('[data-d]'); if (b) step(+b.dataset.d); };
+  let x0 = null;
+  bg.addEventListener('touchstart', ev => { x0 = ev.changedTouches[0].clientX; }, {passive:true});
+  bg.addEventListener('touchend', ev => {
+    if (x0 == null) return;
+    const dx = ev.changedTouches[0].clientX - x0; x0 = null;
+    if (Math.abs(dx) > 40) step(dx < 0 ? 1 : -1);
+  });
+  bg.onclick = ev => { if (ev.target === bg || ev.target === pic) bg.remove(); };
+  document.body.appendChild(bg);
+}
+const card = document.getElementById('card');
+const el = card.querySelector('.imgs');
+const dots = card.querySelectorAll('.dots i');
+const imgs = [...el.querySelectorAll('img')];
+el.addEventListener('scroll', () => {
+  const i = Math.round(el.scrollLeft / Math.max(el.clientWidth, 1));
+  dots.forEach((d,j) => d.classList.toggle('on', j===i));
+}, {passive:true});
+imgs.forEach((img, idx) => img.onclick = ev => { ev.preventDefault(); shopLightbox(imgs.map(x=>x.src), idx); });
+</script>
+</body>
+</html>
